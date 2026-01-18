@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title> Turtle Mountain Road Conditions</title>
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <!-- Top-left status -->
+  <div class="statusCard" id="statusCard">
+    <div class="title">Road Conditions</div>
+    <div class="muted" id="statusText">Loading…</div>
+    <div class="muted small" id="gpsHint"></div>
+  </div>
+
+  <!-- Legend toggle button (top-right) -->
+  <button class="legendToggle" id="legendToggle" aria-label="Toggle legend">
+    Legend
+  </button>
+
+  <!-- Legend panel (top-right, collapsible) -->
+  <div class="legend collapsed" id="legend">
+    <div class="legendHeader">
+      <div class="legendTitle">Legend</div>
+      <button class="legendClose" id="legendClose" aria-label="Close legend">✕</button>
+    </div>
+    <div id="legendRows"></div>
+    <div class="muted" style="margin-top:10px;">
+      Reports are shown for 24 hours.
+    </div>
+  </div>
+
+  <!-- Bottom-right FAB stack -->
+  <div class="fabStack">
+    <!-- Current location button (crosshair) -->
+    <button class="fab secondary" id="btnCurrent" aria-label="Current location">
+      <!-- Inline SVG crosshair (no extra files needed) -->
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M12 2v2.2a7.8 7.8 0 0 1 7.8 7.8H22v2h-2.2A7.8 7.8 0 0 1 12 19.8V22h-2v-2.2A7.8 7.8 0 0 1 4.2 14H2v-2h2.2A7.8 7.8 0 0 1 10 4.2V2h2zm0 4a6 6 0 1 0 0 12a6 6 0 0 0 0-12zm0 2.6a3.4 3.4 0 1 1 0 6.8a3.4 3.4 0 0 1 0-6.8z"/>
+      </svg>
+    </button>
+
+    <!-- Add Report button -->
+    <button class="fab primary" id="btnAdd" aria-label="Add report">+</button>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal">
+      <h2>Create Road Report</h2>
+      <div class="muted" style="margin-bottom:10px;">
+        Uses your current GPS location (you can’t pick another place).
+      </div>
+
+      <div class="grid">
+        <div>
+          <label for="conditionSelect">Condition</label>
+          <select id="conditionSelect"></select>
+        </div>
+        <div class="muted" id="severityText">Severity: --</div>
+        <div class="muted" id="gpsText">GPS: --</div>
+      </div>
+
+      <div class="actions">
+        <button class="btn secondary" id="btnCancel">Cancel</button>
+        <button class="btn" id="btnSubmit">Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
