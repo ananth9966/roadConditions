@@ -116,9 +116,9 @@ legendClose.addEventListener("click", () => legend.classList.add("collapsed"));
 // Map setup
 // =========================
 const map = L.map("map", {
-  zoomControl: true,
+  zoomControl: false,
   attributionControl: true
-}).setView([47.9253, -97.0329], 12);
+}).setView([48.839428, -99.744865], 12);
 
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
@@ -250,6 +250,26 @@ function startFirestore(){
     statusText.textContent = `Firestore error: ${err.message || err}`;
   });
 }
+// Add a logo control (top-left)
+const LogoControl = L.Control.extend({
+  options: { position: 'topleft' },
+
+  onAdd: function () {
+    const img = L.DomUtil.create('img', 'mapLogo');
+    img.src = 'assets/logo.png';   // <-- update path/name to your file
+    img.alt = 'Logo';
+    img.style.width = '56px';
+    img.style.height = 'auto';
+
+    // Prevent map drag/zoom when clicking the logo
+    L.DomEvent.disableClickPropagation(img);
+    L.DomEvent.disableScrollPropagation(img);
+
+    return img;
+  }
+});
+
+map.addControl(new LogoControl());
 
 // =========================
 // HIGH-ACCURACY location strategy

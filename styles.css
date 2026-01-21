@@ -11,11 +11,12 @@
 html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: var(--text); }
 #map { height: 100%; width: 100%; }
 
-/* Top-left status */
+/* Top status card (centered) */
 .statusCard{
-  position: absolute;
-  left: 12px;
+  position: fixed;
+  left: 50%;
   top: 12px;
+  transform: translateX(-50%);
   z-index: 1000;
   background: var(--panel-bg);
   border-radius: var(--radius);
@@ -26,6 +27,17 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 .title{ font-weight: 800; }
 .muted{ color: var(--muted); font-size: 12px; }
 .small{ font-size: 11px; }
+
+/* Leaflet logo control */
+.mapLogo{
+  width: 56px;          /* adjust size */
+  height: auto;
+  display: block;
+  background: rgba(255,255,255,0.92);
+  padding: 6px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
 
 /* Legend toggle (top-right) */
 .legendToggle{
@@ -42,7 +54,7 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   box-shadow: var(--shadow);
 }
 
-/* Legend panel top-right */
+/* Legend panel (top-right) */
 .legend{
   position:absolute;
   right: 12px;
@@ -54,9 +66,19 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   box-shadow: var(--shadow);
   padding: var(--pad);
   overflow: auto;
-  max-height: 52vh;
+  max-height: min(520px, 60vh);
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+
+  /* smooth collapse */
+  transition: transform .18s ease, opacity .18s ease;
+  transform-origin: top right;
 }
-.legend.collapsed{ display:none; }
+.legend.collapsed{
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px) scale(0.98);
+}
 
 .legendHeader{
   display:flex;
@@ -67,30 +89,33 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 }
 .legendTitle{ font-weight: 800; font-size: 14px; }
 .legendClose{
-  border: 0;
-  background: #fff;
-  border-radius: 10px;
-  padding: 6px 10px;
-  cursor: pointer;
   border: 1px solid rgba(0,0,0,0.12);
+  background: #fff;
+  border-radius: 12px;
+  padding: 10px 12px;   /* bigger hit area */
+  min-width: 40px;
+  min-height: 40px;
+  cursor: pointer;
 }
 
 /* Legend rows */
 .row{
-  display:flex; align-items:center; gap: 12px;
-  padding: 8px 0;
+  display:flex;
+  align-items:center;
+  gap: 12px;
+  padding: 10px 0;
   border-bottom: 1px solid rgba(0,0,0,0.06);
 }
 .row:last-child{ border-bottom:0; }
 .sym{
-  width: 52px;
+  width: 48px;
   height: 14px;
   border-radius: 999px;
   border: 1px solid rgba(0,0,0,0.15);
   flex: 0 0 auto;
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35);
 }
-.label{ font-size: 14px; }
+.label{ font-size: 13px; }
 
 .solid{ background: var(--c); }
 .striped{
@@ -123,7 +148,6 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   flex-direction: column;
   gap: 10px;
 }
-
 .fab{
   width: 54px;
   height: 54px;
@@ -137,22 +161,17 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   user-select:none;
   -webkit-tap-highlight-color: transparent;
 }
-
 .fab.primary{
   background:#111;
   color:#fff;
   font-size: 28px;
   font-weight: 900;
 }
-
 .fab.secondary{
   background:#fff;
   border: 1px solid rgba(0,0,0,0.14);
 }
-
-.fab.secondary svg{
-  fill: #111;
-}
+.fab.secondary svg{ fill: #111; }
 
 /* Modal */
 .modal-backdrop{
@@ -182,7 +201,10 @@ select{
   font-size: 14px;
 }
 .actions{
-  display:flex; gap: 10px; justify-content:flex-end; margin-top: 12px;
+  display:flex;
+  gap: 10px;
+  justify-content:flex-end;
+  margin-top: 12px;
 }
 .btn{
   border: 0;
@@ -204,3 +226,8 @@ select{
 .leaflet-popup-content{ margin: 10px 12px; }
 .popup-title{ font-weight: 900; margin-bottom: 6px; }
 .popup-meta{ font-size: 12px; color: var(--muted); line-height: 1.35; }
+
+/* Small screen tweaks */
+@media (max-width: 420px){
+  .statusCard{ top: 64px; } /* avoids crowding with top controls */
+}
