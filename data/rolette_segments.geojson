@@ -1,0 +1,10 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type":"Feature",
+      "properties": { "segmentId":"seg_000001" },
+      "geometry": { "type":"LineString", "coordinates":[[-99.7,48.8],[-99.69,48.81]] }
+    }
+  ]
+}
