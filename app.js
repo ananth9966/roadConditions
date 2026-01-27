@@ -482,7 +482,7 @@ async function submitReport(){
       throw new Error("Road data not loaded yet. Refresh and try again.");
     }
 
-    const pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 });
+    const pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 15 });
     const { latitude, longitude, accuracy } = pos.coords;
 
     const c = condByKey.get(conditionSelect.value);
