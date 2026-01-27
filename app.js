@@ -305,7 +305,6 @@ async function loadRoads(){
     console.warn(e);
     roadsLoaded = false;
     statusText.textContent = "Roads NOT loaded (snap disabled).";
-    gpsHint.textContent = "Tip: run a local server (not file://) so GeoJSON can load.";
   }
 }
 
