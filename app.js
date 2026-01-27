@@ -494,75 +494,47 @@ btnSubmit.addEventListener("click", submitReport);
 // Render as colored ROAD LINES
 // =========================
 function startFirestore(){
-  const sinceDate = new Date(Date.now() - TTL_HOURS*3600*1000);
-  const sinceTs = Timestamp.fromDate(sinceDate);
-
   const q = query(
     collection(db, "reports"),
-    where("createdAt", ">=", sinceTs),
     orderBy("createdAt", "desc"),
     limit(MAX_REPORTS)
   );
 
   onSnapshot(q, (snap) => {
+    console.log("Firestore docs:", snap.size);
+
     const out = [];
     for (const d of snap.docs) {
       const data = d.data();
-      const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : null;
+      const lat = Number(data.lat);
+      const lon = Number(data.lon);
+
+      // skip bad points (prevents marker rendering from breaking)
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+      const createdAt = data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : null;
 
       out.push({
         id: d.id,
         condition: data.condition,
-        severity: Number(data.severity ?? 0),
-        createdAt,
-        segmentId: data.segmentId ?? null,
+        severity: data.severity,
+        lat,
+        lon,
+        accuracyM: Number(data.accuracyM ?? 0),
+        createdAt
       });
     }
 
-    // Filter TTL
-    const now = Date.now();
-    lastReports = out.filter(r => {
-      if (!r.createdAt) return true;
-      return (now - r.createdAt.getTime()) <= TTL_HOURS*3600*1000;
-    });
+    lastReports = out;
+    renderMarkers(lastReports);
 
-    // Aggregate by segmentId (latest + worst-ish)
-    const segmentState = new Map(); // segId -> {condition,severity,count,latestAt}
-    for (const r of lastReports) {
-      if (!r.segmentId) continue;
-
-      const prev = segmentState.get(r.segmentId);
-      const t = r.createdAt ? r.createdAt.getTime() : 0;
-
-      if (!prev) {
-        segmentState.set(r.segmentId, {
-          condition: r.condition,
-          severity: r.severity,
-          count: 1,
-          latestAt: t
-        });
-      } else {
-        prev.count += 1;
-
-        // keep latest report for display
-        if (t >= prev.latestAt) {
-          prev.latestAt = t;
-          prev.condition = r.condition;
-          prev.severity = r.severity;
-        } else {
-          // optionally bump severity if a worse condition exists
-          prev.severity = Math.max(prev.severity, r.severity);
-        }
-      }
-    }
-
-    applyRoadStyles(segmentState);
-    statusText.textContent = `Showing road conditions for ${segmentState.size} segments (last 24h).`;
+    statusText.textContent = `Fetched ${snap.size} docs, rendered ${out.length} markers.`;
   }, (err) => {
     console.error("Firestore error:", err);
     statusText.textContent = `Firestore error: ${err.message || err}`;
   });
 }
+
 
 // =========================
 // Boot
