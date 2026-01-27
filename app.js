@@ -4,7 +4,7 @@ import {
   getFirestore, collection, addDoc,
   query, where, orderBy, limit, onSnapshot,
   serverTimestamp, Timestamp
-} from "https://www.gstatic.com/firebasejs/10.12.0/firebasejs/10.12.0/firebase-firestore.js";
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 // =========================
 // Firebase config (yours)
@@ -27,13 +27,6 @@ const db = getFirestore(app);
 // =========================
 const TTL_HOURS = 24;
 const MAX_REPORTS = 500;
-
-// Road restriction (no logins; client-side guard)
-// - Loads a local GeoJSON of road centerlines
-// - On submit, snaps GPS to nearest road and rejects if too far
-const ROAD_GEOJSON_URL = "./rolette_segments.geojson"; // must be served
-const ROAD_MAX_DIST_M = 35; // allowed GPS distance from a mapped road (meters)
-const REQUIRE_ROAD_GEOMETRY = true; // if true: block submit when roads fail to load
 
 // Condition model (solid vs striped for "Scattered ...")
 const CONDITIONS = [
@@ -132,125 +125,11 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-const roadLayer = L.layerGroup().addTo(map);
 const markersLayer = L.layerGroup().addTo(map);
 let lastReports = [];
 
-// =========================
-// Roads: load + nearest-point helpers
-// =========================
-let roadSegments = []; // [{aLat,aLon,bLat,bLon}]
-let roadsLoaded = false;
-
-function pushLineSegments(coords){
-  // coords: array of [lon,lat]
-  for (let i = 0; i < coords.length - 1; i++){
-    const a = coords[i];
-    const b = coords[i+1];
-    if (!a || !b) continue;
-    const aLon = Number(a[0]), aLat = Number(a[1]);
-    const bLon = Number(b[0]), bLat = Number(b[1]);
-    if (!Number.isFinite(aLat) || !Number.isFinite(aLon) || !Number.isFinite(bLat) || !Number.isFinite(bLon)) continue;
-    roadSegments.push({ aLat, aLon, bLat, bLon });
-  }
-}
-
-function extractSegmentsFromGeoJSON(gj){
-  roadSegments = [];
-
-  const addGeom = (geom) => {
-    if (!geom) return;
-    if (geom.type === "LineString") {
-      pushLineSegments(geom.coordinates || []);
-    } else if (geom.type === "MultiLineString") {
-      for (const line of (geom.coordinates || [])) pushLineSegments(line || []);
-    } else if (geom.type === "GeometryCollection") {
-      for (const g of (geom.geometries || [])) addGeom(g);
-    }
-  };
-
-  if (gj.type === "FeatureCollection") {
-    for (const f of (gj.features || [])) addGeom(f.geometry);
-  } else if (gj.type === "Feature") {
-    addGeom(gj.geometry);
-  } else {
-    addGeom(gj);
-  }
-}
-
-async function loadRoads(){
-  try {
-    const res = await fetch(ROAD_GEOJSON_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const gj = await res.json();
-
-    // draw roads (thin line)
-    L.geoJSON(gj, { style: { weight: 2, opacity: 0.6 } }).addTo(roadLayer);
-
-    extractSegmentsFromGeoJSON(gj);
-    roadsLoaded = true;
-
-    if (roadSegments.length === 0) {
-      console.warn("Road GeoJSON loaded but no LineString segments found.");
-      gpsHint.textContent = "Road data loaded, but no segments found (reports will not be road-restricted).";
-    }
-  } catch (e) {
-    console.warn("Road GeoJSON failed to load:", e);
-    roadsLoaded = false;
-    gpsHint.textContent = REQUIRE_ROAD_GEOMETRY
-      ? "Road data failed to load — reporting is disabled until it loads."
-      : "Road data failed to load — reports won't be road-restricted.";
-  }
-}
-
-// Convert a lat/lon delta to meters around a reference latitude
-function llToMetersDelta(dLat, dLon, refLat){
-  const mPerDegLat = 111111;
-  const cos = Math.max(0.1, Math.cos(refLat * Math.PI / 180));
-  const mPerDegLon = 111111 * cos;
-  return { x: dLon * mPerDegLon, y: dLat * mPerDegLat };
-}
-function metersDeltaToLL(dx, dy, refLat){
-  const degPerMlat = 1 / 111111;
-  const cos = Math.max(0.1, Math.cos(refLat * Math.PI / 180));
-  const degPerMlon = 1 / (111111 * cos);
-  return { dLat: dy * degPerMlat, dLon: dx * degPerMlon };
-}
-
-// nearest point on any road segment
-function nearestPointOnRoad(lat, lon){
-  if (!roadSegments || roadSegments.length === 0) {
-    return { ok: false, distM: Infinity, snapLat: lat, snapLon: lon };
-  }
-
-  let best = { distM: Infinity, snapLat: lat, snapLon: lon };
-
-  for (const s of roadSegments){
-    const A = llToMetersDelta(s.aLat - lat, s.aLon - lon, lat);
-    const B = llToMetersDelta(s.bLat - lat, s.bLon - lon, lat);
-
-    const vx = B.x - A.x;
-    const vy = B.y - A.y;
-    const denom = (vx*vx + vy*vy);
-    if (denom <= 1e-9) continue;
-
-    let t = ( (-A.x)*vx + (-A.y)*vy ) / denom;
-    t = Math.max(0, Math.min(1, t));
-
-    const cx = A.x + t*vx;
-    const cy = A.y + t*vy;
-
-    const dist = Math.hypot(cx, cy);
-    if (dist < best.distM) {
-      const d = metersDeltaToLL(cx, cy, lat);
-      best = { distM: dist, snapLat: lat + d.dLat, snapLon: lon + d.dLon };
-    }
-  }
-
-  return { ok: true, ...best };
-}
-
 function markerSizeForZoom(z){
+  // smaller for road display
   const size = 12 + (z - 10) * 3;
   return Math.max(10, Math.min(34, size));
 }
@@ -266,9 +145,10 @@ map.on("zoomend", () => {
 });
 updateMarkerCssSize();
 
-// deterministic jitter (DISPLAY ONLY; tiny so reports don't look stacked)
+// deterministic jitter
 function jitterLatLng(lat, lon, seed){
-  const meters = 2;
+  const z = map.getZoom();
+  const meters = Math.max(8, Math.min(22, 26 - (z * 1.2)));
 
   let h = 0;
   for (let i=0;i<seed.length;i++){ h = (h*31 + seed.charCodeAt(i)) | 0; }
@@ -298,9 +178,9 @@ function renderMarkers(reports){
   markersLayer.clearLayers();
 
   for (const r of reports) {
-    const [pLat, pLon] = jitterLatLng(r.lat, r.lon, r.id);
+    const [jLat, jLon] = jitterLatLng(r.lat, r.lon, r.id);
 
-    const m = L.marker([pLat, pLon], {
+    const m = L.marker([jLat, jLon], {
       icon: makeDivIcon(r.condition),
       keyboard: false
     });
@@ -317,8 +197,7 @@ function renderMarkers(reports){
         Severity: ${r.severity ?? (c?.severity ?? "--")}<br/>
         Time: ${created ? created.toLocaleString() : "--"}<br/>
         Visible until: ${expires ? expires.toLocaleString() : "--"}<br/>
-        Accuracy: ${Number(r.accuracyM ?? 0).toFixed(1)} m<br/>
-        ${Number.isFinite(r.snapDistM) ? `Road snap: ${Number(r.snapDistM).toFixed(1)} m` : ""}
+        Accuracy: ${Number(r.accuracyM ?? 0).toFixed(1)} m
       </div>
     `);
 
@@ -355,13 +234,15 @@ function startFirestore(){
         lat: Number(data.lat),
         lon: Number(data.lon),
         accuracyM: Number(data.accuracyM ?? 0),
-        snapDistM: Number.isFinite(Number(data.snapDistM)) ? Number(data.snapDistM) : undefined,
         createdAt
       });
     }
 
     const now = Date.now();
-    lastReports = out.filter(r => !r.createdAt || (now - new Date(r.createdAt).getTime()) <= TTL_HOURS*3600*1000);
+    lastReports = out.filter(r => {
+      if (!r.createdAt) return true;
+      return (now - new Date(r.createdAt).getTime()) <= TTL_HOURS*3600*1000;
+    });
 
     renderMarkers(lastReports);
   }, (err) => {
@@ -369,10 +250,34 @@ function startFirestore(){
     statusText.textContent = `Firestore error: ${err.message || err}`;
   });
 }
+// Add a logo control (top-left)
+const LogoControl = L.Control.extend({
+  options: { position: 'topleft' },
+
+  onAdd: function () {
+    const img = L.DomUtil.create('img', 'mapLogo');
+    img.src = 'assets/logo.png';   // <-- update path/name to your file
+    img.alt = 'Logo';
+    img.style.width = '56px';
+    img.style.height = 'auto';
+
+    // Prevent map drag/zoom when clicking the logo
+    L.DomEvent.disableClickPropagation(img);
+    L.DomEvent.disableScrollPropagation(img);
+
+    return img;
+  }
+});
+
+map.addControl(new LogoControl());
 
 // =========================
 // HIGH-ACCURACY location strategy
 // =========================
+// This is the key improvement:
+// - Use watchPosition for a few seconds
+// - Pick the best (lowest accuracy meters)
+// - Resolve early if it reaches desired accuracy
 function getBestPosition({
   maxWaitMs = 9000,
   desiredAccuracyM = 25,
@@ -384,20 +289,25 @@ function getBestPosition({
       return;
     }
 
-    let best = null;
+    let best = null; // {pos, t}
     const t0 = Date.now();
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         const acc = pos.coords.accuracy ?? Infinity;
 
-        if (!best || acc < (best.pos.coords.accuracy ?? Infinity)) best = { pos, t: Date.now() };
+        // keep best
+        if (!best || acc < (best.pos.coords.accuracy ?? Infinity)) {
+          best = { pos, t: Date.now() };
+        }
 
+        // resolve early if good enough
         if (acc <= desiredAccuracyM) {
           navigator.geolocation.clearWatch(watchId);
           resolve(best.pos);
         }
 
+        // timeout
         if (Date.now() - t0 >= maxWaitMs) {
           navigator.geolocation.clearWatch(watchId);
           if (best) resolve(best.pos);
@@ -408,7 +318,11 @@ function getBestPosition({
         navigator.geolocation.clearWatch(watchId);
         reject(err);
       },
-      { enableHighAccuracy, timeout: maxWaitMs, maximumAge: 0 }
+      {
+        enableHighAccuracy,
+        timeout: maxWaitMs,
+        maximumAge: 0
+      }
     );
   });
 }
@@ -435,7 +349,11 @@ async function centerOnBestLocation(){
 }
 
 btnCurrent.addEventListener("click", centerOnBestLocation);
-window.addEventListener("load", () => centerOnBestLocation());
+
+// Ask location on load (your requirement)
+window.addEventListener("load", () => {
+  centerOnBestLocation();
+});
 
 // =========================
 // Modal + submit
@@ -449,14 +367,10 @@ function openModal(){
     .then((pos) => {
       const { accuracy } = pos.coords;
       gpsText.textContent = `GPS accuracy: ±${accuracy.toFixed(0)} m`;
-
+      // Optional: block submit if too inaccurate
       btnSubmit.disabled = accuracy > 100;
-
-      if (accuracy > 100) gpsText.textContent += " (too low — move to open sky and try again)";
-
-      if (REQUIRE_ROAD_GEOMETRY && (!roadsLoaded || roadSegments.length === 0)) {
-        btnSubmit.disabled = true;
-        gpsText.textContent += " (road data not loaded yet)";
+      if (accuracy > 100) {
+        gpsText.textContent += " (too low — move to open sky and try again)";
       }
     })
     .catch(() => {
@@ -471,54 +385,32 @@ function closeModal(){
 
 btnAdd.addEventListener("click", openModal);
 btnCancel.addEventListener("click", closeModal);
-modalBackdrop.addEventListener("click", (e) => { if (e.target === modalBackdrop) closeModal(); });
+modalBackdrop.addEventListener("click", (e) => {
+  if (e.target === modalBackdrop) closeModal();
+});
 
 async function submitReport(){
   btnSubmit.disabled = true;
   btnSubmit.textContent = "Submitting…";
 
   try {
-    if (REQUIRE_ROAD_GEOMETRY && (!roadsLoaded || roadSegments.length === 0)) {
-      throw new Error("Road data not loaded yet. Refresh and try again.");
-    }
-
     const pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 });
     const { latitude, longitude, accuracy } = pos.coords;
 
     const c = condByKey.get(conditionSelect.value);
     if (!c) throw new Error("Invalid condition.");
 
-    // Road restriction: snap + reject if too far
-    let finalLat = latitude;
-    let finalLon = longitude;
-    let snapDistM = null;
-
-    if (roadSegments.length > 0) {
-      const n = nearestPointOnRoad(latitude, longitude);
-      snapDistM = n.distM;
-
-      const allowed = Math.max(20, accuracy); // accuracy from GPS in meters
-      if (n.distM > allowed) {
-      throw new Error(`You appear to be ${n.distM.toFixed(0)}m from a mapped road. Report only from a road (within ${allowed.toFixed(0)}m).`);
-    }
-
-
-      finalLat = n.snapLat;
-      finalLon = n.snapLon;
-    }
-
     await addDoc(collection(db, "reports"), {
       condition: c.key,
       severity: c.severity,
-      lat: finalLat,
-      lon: finalLon,
+      lat: latitude,
+      lon: longitude,
       accuracyM: accuracy,
-      snapDistM,
       createdAt: serverTimestamp()
     });
 
     closeModal();
-    map.setView([finalLat, finalLon], Math.max(map.getZoom(), 14));
+    map.setView([latitude, longitude], Math.max(map.getZoom(), 14));
   } catch (e) {
     console.error(e);
     alert(`Submit failed: ${e.message || e}`);
@@ -534,6 +426,5 @@ btnSubmit.addEventListener("click", submitReport);
 // Boot
 // =========================
 buildLegendAndSelect();
-loadRoads();
 startFirestore();
 statusText.textContent = "Ready.";
