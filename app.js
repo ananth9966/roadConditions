@@ -497,9 +497,11 @@ async function submitReport(){
       const n = nearestPointOnRoad(latitude, longitude);
       snapDistM = n.distM;
 
-      if (n.distM > ROAD_MAX_DIST_M) {
-        throw new Error(`You appear to be ${n.distM.toFixed(0)}m from a mapped road. Report only from a road (within ${ROAD_MAX_DIST_M}m).`);
-      }
+      const allowed = Math.max(20, accuracy); // accuracy from GPS in meters
+      if (n.distM > allowed) {
+      throw new Error(`You appear to be ${n.distM.toFixed(0)}m from a mapped road. Report only from a road (within ${allowed.toFixed(0)}m).`);
+    }
+
 
       finalLat = n.snapLat;
       finalLon = n.snapLon;
