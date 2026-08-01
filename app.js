@@ -47,7 +47,7 @@ signInAnonymously(auth).catch((err) => {
 // CONFIG
 // =========================
 // Roads here can go unplowed for days, so a report does not stop being true
-// after 24 hours. Older reports stay visible but fade, which beats deleting
+// quickly. Older reports stay visible but fade, which beats deleting
 // information that is still the best anyone has.
 const REPORT_WINDOW_HOURS = 48;
 const FRESH_HOURS = 3;          // fully opaque up to here, then fades
@@ -597,13 +597,13 @@ function renderReports(reports){
   }
 
   const summary = reports.length
-    ? `${reports.length} reports on ${drawn} stretches (last 24h).`
-    : "No reports in the last 24 hours.";
+    ? `${reports.length} reports on ${drawn} stretches (last ${REPORT_WINDOW_HOURS}h).`
+    : `No reports in the last ${REPORT_WINDOW_HOURS} hours.`;
   statusText.textContent = roadsStatus ? `${summary} ${roadsStatus}` : summary;
 }
 
 // =========================
-// Firestore stream (last 24 hours)
+// Firestore stream (recent reports)
 // =========================
 function startFirestore(){
   const sinceDate = new Date(Date.now() - REPORT_WINDOW_HOURS*3600*1000);
@@ -630,7 +630,6 @@ function startFirestore(){
       out.push({
         id: d.id,
         condition: data.condition,
-        severity: data.severity,
         lat: Number(data.lat),
         lon: Number(data.lon),
         accuracyM: Number(data.accuracyM ?? 0),
@@ -959,7 +958,6 @@ async function quickSubmit(c){
   try {
     const ref = await addDoc(collection(db, "reports"), {
       condition: c.key,
-      severity: c.severity,
       lat: snap.lat,
       lon: snap.lon,
       accuracyM: fix.accuracyM,
@@ -1111,7 +1109,6 @@ async function submitReport(){
 
     await addDoc(collection(db, "reports"), {
       condition: c.key,
-      severity: c.severity,
       lat: snap.lat,                 // snapped, not raw
       lon: snap.lon,
       accuracyM,

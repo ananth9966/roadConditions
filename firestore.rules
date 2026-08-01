@@ -30,18 +30,16 @@ service cloud.firestore {
 
     function isWellFormedReport(d) {
       return d.keys().hasOnly([
-               'condition', 'severity', 'lat', 'lon', 'accuracyM',
+               'condition', 'lat', 'lon', 'accuracyM',
                'segmentId', 'roadName', 'snapDistanceM', 'createdAt'
              ])
           && d.keys().hasAll([
-               'condition', 'severity', 'lat', 'lon', 'accuracyM',
+               'condition', 'lat', 'lon', 'accuracyM',
                'segmentId', 'snapDistanceM', 'createdAt'
              ])
 
           && d.condition is string
           && isKnownCondition(d.condition)
-
-          && d.severity is int && d.severity >= 1 && d.severity <= 3
 
           && isInCounty(d.lat, d.lon)
 

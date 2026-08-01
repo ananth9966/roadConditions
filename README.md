@@ -133,9 +133,8 @@ Two console steps are required before the security rules will work:
 
 `firestore.rules` keeps reads public (the map is public) but makes the
 `reports` collection append-only and validates every field on create:
-condition must be one of the eleven known keys, severity 1–3, coordinates
-inside the county bounding box, snap distance ≤ 60 m, and the timestamp must be
-the server's own.
+condition must be one of the eleven known keys, coordinates inside the county
+bounding box, snap distance ≤ 60 m, and the timestamp must be the server's own.
 
 Also turn on **App Check** in the Firebase console. The rules stop malformed
 writes, but only App Check stops a script writing well-formed junk in bulk.
