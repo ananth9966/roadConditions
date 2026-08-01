@@ -6,16 +6,38 @@
   --radius: 14px;
   --pad: 12px;
   --marker-size: 18px;
+
+  /* Notch and home-indicator clearance. Zero on hardware without them, and
+     only non-zero at all because index.html sets viewport-fit=cover. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
-html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: var(--text); }
-#map { height: 100%; width: 100%; }
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: var(--text);
+  /* Installed apps have no browser chrome to absorb an overscroll bounce. */
+  overscroll-behavior: none;
+}
+
+#map { width: 100%; height: 100%; }
+
+/* Dynamic viewport height tracks the mobile address bar as it collapses, so
+   the map neither clips nor leaves a gap mid-scroll. */
+@supports (height: 100dvh) {
+  html, body { height: 100dvh; }
+  #map { height: 100dvh; }
+}
 
 /* Top status card (centered) */
 .statusCard{
   position: fixed;
   left: 50%;
-  top: 12px;
+  top: calc(12px + var(--safe-top));
   transform: translateX(-50%);
   z-index: 1000;
   background: var(--panel-bg);
@@ -41,10 +63,11 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 
 /* Legend toggle (top-right) */
 .legendToggle{
-  position: absolute;
-  right: 12px;
-  top: 12px;
+  position: fixed;
+  right: calc(12px + var(--safe-right));
+  top: calc(12px + var(--safe-top));
   z-index: 1100;
+  min-height: 44px;
   border: 1px solid rgba(0,0,0,0.12);
   background: var(--panel-bg);
   border-radius: 12px;
@@ -56,10 +79,10 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 
 /* Legend panel (top-right) */
 .legend{
-  position:absolute;
-  right: 12px;
-  top: 56px;
-  width: min(360px, calc(100% - 24px));
+  position: fixed;
+  right: calc(12px + var(--safe-right));
+  top: calc(64px + var(--safe-top));
+  width: min(360px, calc(100vw - 24px - var(--safe-left) - var(--safe-right)));
   z-index: 1200;
   background: var(--panel-bg);
   border-radius: var(--radius);
@@ -140,13 +163,23 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 
 /* Bottom-right buttons */
 .fabStack{
-  position: absolute;
-  right: 14px;
-  bottom: 18px;
+  position: fixed;
+  right: calc(14px + var(--safe-right));
+  /* Clears both the home indicator and Leaflet's attribution strip, which
+     also lives bottom-right and used to sit underneath these buttons. */
+  bottom: calc(34px + var(--safe-bottom));
   z-index: 1500;
   display:flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* Keep the attribution out from under the buttons rather than hiding it —
+   the OSM licence requires it stay visible. */
+.leaflet-bottom.leaflet-right .leaflet-control-attribution{
+  margin-right: calc(82px + var(--safe-right));
+  margin-bottom: calc(2px + var(--safe-bottom));
+  max-width: calc(100vw - 100px);
 }
 .fab{
   width: 54px;
@@ -175,13 +208,14 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 
 /* Modal */
 .modal-backdrop{
-  position: absolute; inset: 0;
+  position: fixed; inset: 0;
   background: rgba(0,0,0,0.45);
   display: none;
   z-index: 2000;
   align-items: flex-end;
   justify-content: center;
   padding: 12px;
+  padding-bottom: calc(12px + var(--safe-bottom));
 }
 .modal{
   width: min(520px, 100%);
@@ -200,6 +234,33 @@ select{
   border: 1px solid #ddd;
   font-size: 14px;
 }
+/* Whether you are on a road decides if the report can be filed at all, so it
+   gets its own treatment rather than sitting in the same grey as the GPS
+   accuracy readout. */
+.notice{
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.notice.ok{
+  color: #14602c;
+  background: #eaf7ee;
+  border: 1px solid #34a853;
+}
+.notice.warn{
+  color: #7a4b00;
+  background: #fff4e5;
+  border: 1px solid #f0b429;
+}
+.notice.pending{
+  color: var(--muted);
+  background: var(--panel-bg);
+  border: 1px solid rgba(0,0,0,0.12);
+  font-weight: 500;
+}
+
 .actions{
   display:flex;
   gap: 10px;
@@ -227,7 +288,12 @@ select{
 .popup-title{ font-weight: 900; margin-bottom: 6px; }
 .popup-meta{ font-size: 12px; color: var(--muted); line-height: 1.35; }
 
-/* Small screen tweaks */
-@media (max-width: 420px){
-  .statusCard{ top: 64px; } /* avoids crowding with top controls */
+/* Small screen tweaks.
+   The old breakpoint was 420px, which left phones like a 430px-wide iPhone
+   Pro Max overlapping the centred status card with the Legend button. Any
+   handset-width viewport now drops the card below the top control row. */
+@media (max-width: 600px){
+  .statusCard{
+    top: calc(68px + var(--safe-top));
+  }
 }

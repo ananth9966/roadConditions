@@ -2,8 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title> Turtle Mountain Road Conditions</title>
+  <!-- viewport-fit=cover is what lets env(safe-area-inset-*) report real
+       values, so controls clear the notch and home indicator in standalone. -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Turtle Mountain Road Conditions</title>
+  <meta name="description" content="Crowd-sourced winter road conditions for the Turtle Mountain area, Rolette County, North Dakota." />
+
+  <link rel="manifest" href="./manifest.json" />
+  <meta name="theme-color" content="#111111" />
+  <link rel="icon" href="./assets/icons/favicon-32.png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="./assets/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Road Conditions" />
 
   <!-- Leaflet -->
   <link
@@ -78,7 +89,7 @@
         </div>
         <div class="muted" id="severityText">Severity: --</div>
         <div class="muted" id="gpsText">GPS: --</div>
-        <div class="muted" id="roadText">Road: --</div>
+        <div class="notice pending" id="roadText">Checking for a road…</div>
       </div>
 
       <div class="actions">
@@ -89,5 +100,17 @@
   </div>
 
   <script type="module" src="./app.js"></script>
+
+  <!-- Registered here rather than in app.js so the shell still caches even if
+       the module fails to evaluate. -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch((err) => {
+          console.warn("Service worker registration failed:", err);
+        });
+      });
+    }
+  </script>
 </body>
 </html>

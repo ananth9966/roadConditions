@@ -56,6 +56,37 @@ python tools/verify_snap.py
 Ports `snapToRoad()` to Python and runs it against known coordinates, so the
 snapping can be checked without a browser.
 
+## Installing on a phone
+
+The app is a PWA, so it installs from the browser with no app store:
+
+- **Android / Chrome** — open the site, then *Add to Home screen* (Chrome
+  usually offers an install prompt on its own).
+- **iOS / Safari** — Share → *Add to Home Screen*.
+
+It then launches without browser chrome, with its own icon and splash colour.
+`tools/make_icons.py` regenerates the icon set from `assets/logo.png`; the
+source is photographic, so icons are octree-quantised to 128 colours, which
+takes the 512px icon from 420 KB to about 67 KB.
+
+## Working offline
+
+Signal disappears exactly where this app is most needed, so `sw.js` caches:
+
+| Cache | Contents | Strategy |
+| --- | --- | --- |
+| `rc-shell` | HTML, JS, CSS, icons, road GeoJSON | cache-first, revalidated |
+| `rc-vendor` | Leaflet and Firebase (version-pinned) | cache-first |
+| `rc-tiles` | Map tiles you have viewed | cache-first, capped at 400 |
+
+Firestore requests are deliberately left alone — the SDK has its own offline
+layer, enabled here via `persistentLocalCache`. Previously seen reports render
+with no connection, and a report submitted offline is queued and sent when the
+connection returns.
+
+Bump `CACHE_VERSION` in `sw.js` whenever the shell or road data changes; old
+caches are deleted on activate.
+
 ## Firebase setup
 
 Two console steps are required before the security rules will work:

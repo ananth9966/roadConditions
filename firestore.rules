@@ -3,23 +3,73 @@ rules_version = '2';
 // Deploy with:  firebase deploy --only firestore:rules
 //
 // Prerequisite: enable Anonymous sign-in in the Firebase console under
-// Authentication > Sign-in method. Without it, request.auth stays null and
-// every write below is rejected.
+// Authentication > Sign-in method. Without it request.auth stays null and
+// every create below is rejected.
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Rules functions must be declared inside the match scope that uses them.
+    function isKnownCondition(c) {
+      return c in [
+        'closedBlocked', 'noTravelAdvised',
+        'iceCompactedSnow', 'scatteredIce',
+        'snowCovered', 'scatteredSnowDrifts',
+        'frost', 'scatteredFrost',
+        'wetSlush', 'scatteredWetSlush',
+        'seasonalGood'
+      ];
+    }
+
+    // Rolette County bounding box — the area the road data covers. A report
+    // outside it cannot have been snapped to our network.
+    function isInCounty(lat, lon) {
+      return lat is number && lat > 48.5 && lat < 49.05
+          && lon is number && lon > -100.15 && lon < -99.3;
+    }
+
+    function isWellFormedReport(d) {
+      return d.keys().hasOnly([
+               'condition', 'severity', 'lat', 'lon', 'accuracyM',
+               'segmentId', 'roadName', 'snapDistanceM', 'createdAt'
+             ])
+          && d.keys().hasAll([
+               'condition', 'severity', 'lat', 'lon', 'accuracyM',
+               'segmentId', 'snapDistanceM', 'createdAt'
+             ])
+
+          && d.condition is string
+          && isKnownCondition(d.condition)
+
+          && d.severity is int && d.severity >= 1 && d.severity <= 3
+
+          && isInCounty(d.lat, d.lon)
+
+          && d.accuracyM is number && d.accuracyM >= 0 && d.accuracyM <= 100
+
+          // Server-side echo of the client's snap check: a report claiming to
+          // sit more than 60 m from a road was not snapped by our client.
+          && d.snapDistanceM is number
+          && d.snapDistanceM >= 0 && d.snapDistanceM <= 60
+
+          && d.segmentId is string && d.segmentId.size() <= 40
+          && (!('roadName' in d) || (d.roadName is string && d.roadName.size() <= 80))
+
+          // Must be the server's clock, not one the client invented.
+          && d.createdAt == request.time;
+    }
 
     match /reports/{reportId} {
 
       // The map is public, so reads stay open.
       allow read: if true;
 
-      // Reports are append-only. Nothing may edit or delete an existing
-      // report, so a bad actor cannot rewrite history.
-      allow update, delete: if false;
-
       allow create: if request.auth != null
                     && isWellFormedReport(request.resource.data);
+
+      // Append-only: no client may rewrite or erase a report. Moderation runs
+      // through the Firebase console or Admin SDK, which bypass these rules.
+      allow update, delete: if false;
     }
 
     // Anything not matched above is denied.
@@ -27,45 +77,4 @@ service cloud.firestore {
       allow read, write: if false;
     }
   }
-}
-
-function isWellFormedReport(d) {
-  return d.keys().hasOnly([
-           'condition', 'severity', 'lat', 'lon', 'accuracyM',
-           'segmentId', 'roadName', 'snapDistanceM', 'createdAt'
-         ])
-      && d.keys().hasAll([
-           'condition', 'severity', 'lat', 'lon', 'accuracyM',
-           'segmentId', 'snapDistanceM', 'createdAt'
-         ])
-
-      // Condition must be one of the eleven the client offers.
-      && d.condition is string
-      && d.condition in [
-           'closedBlocked', 'noTravelAdvised',
-           'iceCompactedSnow', 'scatteredIce',
-           'snowCovered', 'scatteredSnowDrifts',
-           'frost', 'scatteredFrost',
-           'wetSlush', 'scatteredWetSlush',
-           'seasonalGood'
-         ]
-
-      && d.severity is int && d.severity >= 1 && d.severity <= 3
-
-      // Confine reports to the Rolette County bounding box the road data
-      // covers. A report outside it cannot have been snapped to our network.
-      && d.lat is number && d.lat > 48.5 && d.lat < 49.05
-      && d.lon is number && d.lon > -100.15 && d.lon < -99.3
-
-      && d.accuracyM is number && d.accuracyM >= 0 && d.accuracyM <= 100
-
-      // Server-side echo of the client's snap check: a report claiming to sit
-      // more than 60 m from a road was not snapped by our client.
-      && d.snapDistanceM is number && d.snapDistanceM >= 0 && d.snapDistanceM <= 60
-
-      && d.segmentId is string && d.segmentId.size() <= 40
-      && (!('roadName' in d) || (d.roadName is string && d.roadName.size() <= 80))
-
-      // Timestamp must be the server's, not one the client invented.
-      && d.createdAt == request.time;
 }

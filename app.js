@@ -1,7 +1,8 @@
 // Firebase modular SDK (CDN)
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
-  getFirestore, collection, addDoc,
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  collection, addDoc,
   query, where, orderBy, limit, onSnapshot,
   serverTimestamp, Timestamp
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -23,7 +24,14 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+
+// IndexedDB-backed cache: previously seen reports still render with no signal,
+// and a report submitted offline is queued and sent when the connection comes
+// back. Both matter on a county road in bad weather.
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
+
 const auth = getAuth(app);
 
 // Anonymous sign-in gives firestore.rules a request.auth to require, without
@@ -494,16 +502,21 @@ function showSnapPreview(rawLat, rawLon, snap){
 // re-acquiring, so what gets stored is exactly what was previewed.
 let pendingFix = null;
 
+function setRoadNotice(kind, message){
+  roadText.className = `notice ${kind}`;
+  roadText.textContent = message;
+}
+
 async function openModal(){
   modalBackdrop.style.display = "flex";
   gpsText.textContent = "GPS: checking…";
-  roadText.textContent = "Road: --";
+  setRoadNotice("pending", "Checking for a road…");
   btnSubmit.disabled = true;
   pendingFix = null;
   previewLayer.clearLayers();
 
   if (!roadsReady){
-    roadText.textContent = "Road data not loaded yet — try again in a moment.";
+    setRoadNotice("warn", "Road data not loaded yet — try again in a moment.");
     return;
   }
 
@@ -512,6 +525,7 @@ async function openModal(){
     pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 });
   } catch {
     gpsText.textContent = "GPS unavailable (permission denied?)";
+    setRoadNotice("warn", "No GPS fix, so there is nothing to place on a road.");
     return;
   }
 
@@ -519,20 +533,21 @@ async function openModal(){
   gpsText.textContent = `GPS accuracy: ±${accuracy.toFixed(0)} m`;
 
   if (accuracy > 100){
-    gpsText.textContent += " (too low — move to open sky and try again)";
+    gpsText.textContent += " (too low)";
+    setRoadNotice("warn", "GPS accuracy too low — move to open sky and try again.");
     return;
   }
 
   const snap = snapToRoad(latitude, longitude, snapLimitFor(accuracy));
   if (!snap){
-    roadText.textContent = "You are not on a mapped road. Move onto the road to report.";
+    setRoadNotice("warn", "You are not on a mapped road. Drive onto the road to report.");
     return;
   }
 
   pendingFix = { lat: latitude, lon: longitude, accuracyM: accuracy, snap };
-  roadText.textContent = snap.roadName
-    ? `Road: ${snap.roadName} — pin moved ${snap.distanceM.toFixed(0)} m`
-    : `Snapped to road — pin moved ${snap.distanceM.toFixed(0)} m`;
+  setRoadNotice("ok", snap.roadName
+    ? `On ${snap.roadName} — pin moved ${snap.distanceM.toFixed(0)} m to the road`
+    : `Snapped to the road — pin moved ${snap.distanceM.toFixed(0)} m`);
 
   showSnapPreview(latitude, longitude, snap);
   map.setView([snap.lat, snap.lon], Math.max(map.getZoom(), 15));
@@ -554,7 +569,7 @@ modalBackdrop.addEventListener("click", (e) => {
 async function submitReport(){
   // Without a snapped fix there is nothing valid to file.
   if (!pendingFix){
-    roadText.textContent = "No road match — nothing to submit.";
+    setRoadNotice("warn", "No road match — nothing to submit.");
     return;
   }
 
