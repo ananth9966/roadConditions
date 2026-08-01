@@ -5,7 +5,6 @@
   --shadow: 0 10px 30px rgba(0,0,0,.18);
   --radius: 14px;
   --pad: 12px;
-  --marker-size: 18px;
 
   /* Notch and home-indicator clearance. Zero on hardware without them, and
      only non-zero at all because index.html sets viewport-fit=cover. */
@@ -151,14 +150,12 @@ html, body {
   );
 }
 
-/* Marker (screenshot-style bar) */
-.rc-marker{
-  width: var(--marker-size);
-  height: calc(var(--marker-size) * 0.55);
-  border-radius: 999px;
-  border: 1px solid rgba(0,0,0,0.25);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
-  transform: translate(-50%, -50%);
+/* Conditions are drawn as coloured road strokes, not pins, so the stroke gets
+   a dark casing the way a basemap road does — it keeps a pale colour such as
+   frost readable against snow-coloured terrain. */
+.leaflet-overlay-pane path.leaflet-interactive{
+  paint-order: stroke;
+  stroke-linecap: butt;
 }
 
 /* Bottom-right buttons */

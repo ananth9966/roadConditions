@@ -47,6 +47,28 @@ raw and ~107 KB gzipped.
 
 To cover a different area, edit `BBOX` at the top of that script.
 
+## How conditions are drawn
+
+Reports are not pins. Each one is placed along its road by distance from the
+road's start, and then drawn as the road itself, the way a DOT road-conditions
+map does it:
+
+- Two or more reports of the **same condition on the same road**, each within
+  `JOIN_MAX_M` (2 km) of the next, colour the whole stretch between them.
+- A report with no neighbour in range is drawn as a `STUB_M` (150 m) piece of
+  road centred on it.
+- Lines follow the road's vertices, so they bend with the road rather than
+  cutting across a curve.
+- "Scattered …" conditions are dashed, matching their striped legend swatch.
+- A dark casing sits under each stroke so pale colours such as frost stay
+  readable on a light basemap.
+- Stroke width grows with zoom, standing in for road width.
+
+Reports can only be joined along a shared OpenStreetMap way. OSM splits roads
+arbitrarily, so two reports on one physical road may sit on different ways and
+stay separate. Way lengths here are a median of 573 m and 1,614 m at the 75th
+percentile, so most joins that matter do land on a single way.
+
 ### Checking the geometry
 
 ```
@@ -55,6 +77,15 @@ python tools/verify_snap.py
 
 Ports `snapToRoad()` to Python and runs it against known coordinates, so the
 snapping can be checked without a browser.
+
+```
+python tools/verify_render.py
+```
+
+Does the same for the drawing logic: confirms a sub-path traces the road
+rather than cutting a chord (it tests against the curviest way in the county —
+2,466 m long with its endpoints only 37 m apart) and that run grouping joins,
+chains and splits at the right distances.
 
 ## Installing on a phone
 

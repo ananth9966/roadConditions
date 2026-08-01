@@ -163,30 +163,29 @@ let lastReports = [];
 // Kept out of the report count line so a road-data failure stays visible.
 let roadsStatus = "";
 
-function markerSizeForZoom(z){
-  // smaller for road display
-  const size = 12 + (z - 10) * 3;
-  return Math.max(10, Math.min(34, size));
+// Conditions are drawn as the road itself, so stroke width stands in for road
+// width and has to grow with zoom the way the basemap's roads do.
+function weightForZoom(z){
+  return Math.max(4, Math.min(12, Math.round(4 + (z - 10) * 1.1)));
 }
 
-function updateMarkerCssSize(){
-  const z = map.getZoom();
-  const ms = markerSizeForZoom(z);
-  document.documentElement.style.setProperty("--marker-size", `${ms}px`);
-}
-map.on("zoomend", () => {
-  updateMarkerCssSize();
-  renderMarkers(lastReports);
-});
-updateMarkerCssSize();
+map.on("zoomend", () => renderReports(lastReports));
 
 // =========================
 // Road network + snapping
 // =========================
 // Segments are projected once into a local metric plane so snapping is a
 // straight point-to-segment distance rather than repeated trig.
-let roadSegments = [];      // [{ id, name, xy: Float64Array }]
+let roadSegments = [];      // [{ id, name, xy: Float64Array, cum: Float64Array }]
+let segmentById = new Map();
 let roadsReady = false;
+
+// Two reports on the same road are joined into one coloured stretch when they
+// are no further apart than this along that road.
+const JOIN_MAX_M = 2000;
+// A report with no neighbour still has to be visible, so it is drawn as a
+// short piece of road centred on it rather than a pin.
+const STUB_M = 150;
 
 function lonLatToXY(lon, lat){
   return [lon * REF_COSLAT * METRES_PER_DEG_LAT, lat * METRES_PER_DEG_LAT];
@@ -210,11 +209,78 @@ async function loadRoads(){
         xy[i*2] = x;
         xy[i*2+1] = y;
       }
-      return { id: f.properties?.segmentId || "", name: f.properties?.name || "", xy };
+
+      // Cumulative distance to each vertex, so a report's position along the
+      // road is a single number and sub-paths are a slice.
+      const cum = new Float64Array(coords.length);
+      for (let i = 1; i < coords.length; i++){
+        const dx = xy[i*2] - xy[(i-1)*2];
+        const dy = xy[i*2+1] - xy[(i-1)*2+1];
+        cum[i] = cum[i-1] + Math.hypot(dx, dy);
+      }
+
+      return { id: f.properties?.segmentId || "", name: f.properties?.name || "", xy, cum };
     });
 
+  segmentById = new Map(roadSegments.map(s => [s.id, s]));
   roadsReady = roadSegments.length > 0;
   return roadSegments.length;
+}
+
+// Distance from the start of a road to the point on it closest to lat/lon.
+function alongDistanceOn(seg, lat, lon){
+  const [px, py] = lonLatToXY(lon, lat);
+  const { xy, cum } = seg;
+  let bestD2 = Infinity, bestAlong = 0;
+
+  for (let i = 0; i < xy.length - 2; i += 2){
+    const ax = xy[i], ay = xy[i+1];
+    const abx = xy[i+2] - ax, aby = xy[i+3] - ay;
+
+    const seg2 = abx*abx + aby*aby;
+    let t = seg2 === 0 ? 0 : ((px - ax)*abx + (py - ay)*aby) / seg2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+
+    const qx = ax + t*abx, qy = ay + t*aby;
+    const d2 = (px - qx)**2 + (py - qy)**2;
+    if (d2 < bestD2){
+      bestD2 = d2;
+      bestAlong = cum[i/2] + t * Math.sqrt(seg2);
+    }
+  }
+  return bestAlong;
+}
+
+// The stretch of road between two along-distances, as Leaflet [lat, lon]
+// pairs. Following the vertices is what makes the line bend with the road
+// instead of cutting the corner.
+function subPath(seg, fromM, toM){
+  const { xy, cum } = seg;
+  const total = cum[cum.length - 1];
+  let a = Math.max(0, Math.min(total, Math.min(fromM, toM)));
+  let b = Math.max(0, Math.min(total, Math.max(fromM, toM)));
+
+  function pointAt(dist){
+    // Locate the vertex pair containing dist, then interpolate.
+    let i = 0;
+    while (i < cum.length - 2 && cum[i+1] < dist) i++;
+    const span = cum[i+1] - cum[i];
+    const t = span === 0 ? 0 : (dist - cum[i]) / span;
+    const x = xy[i*2] + t * (xy[i*2+2] - xy[i*2]);
+    const y = xy[i*2+1] + t * (xy[i*2+3] - xy[i*2+1]);
+    const [lon, lat] = xyToLonLat(x, y);
+    return [lat, lon];
+  }
+
+  const path = [pointAt(a)];
+  for (let i = 0; i < cum.length; i++){
+    if (cum[i] > a && cum[i] < b){
+      const [lon, lat] = xyToLonLat(xy[i*2], xy[i*2+1]);
+      path.push([lat, lon]);
+    }
+  }
+  path.push(pointAt(b));
+  return path;
 }
 
 // Nearest point on the road network. Returns null when nothing is close
@@ -256,21 +322,17 @@ function snapLimitFor(accuracyM){
   return Math.min(SNAP_CAP_M, SNAP_BASE_M + (Number(accuracyM) || 0));
 }
 
-function makeDivIcon(conditionKey){
-  const c = condByKey.get(conditionKey) || condByKey.get("seasonalGood");
-  const cls = `rc-marker ${c.style}`;
-  const html = `<div class="${cls}" style="--c:${c.color}"></div>`;
-  return L.divIcon({
-    className: "",
-    html,
-    iconSize: [1,1],
-    iconAnchor: [0,0]
-  });
+function relativeTime(date){
+  const mins = Math.round((Date.now() - date.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  return hrs === 1 ? "1 hour ago" : `${hrs} hours ago`;
 }
 
 // Built with DOM nodes, not an HTML string: every value here originates in
 // Firestore, so interpolating it into innerHTML would be an injection point.
-function buildPopup(r, c){
+function buildPopup(run, c, seg, lengthM){
   const wrap = document.createElement("div");
 
   const title = document.createElement("div");
@@ -278,17 +340,28 @@ function buildPopup(r, c){
   title.textContent = c.label;
   wrap.appendChild(title);
 
-  const created = r.createdAt ? new Date(r.createdAt) : null;
-  const expires = created ? new Date(created.getTime() + TTL_HOURS*3600*1000) : null;
+  const times = run
+    .map(r => (r.createdAt ? new Date(r.createdAt) : null))
+    .filter(Boolean)
+    .sort((a, b) => b - a);
 
   const meta = document.createElement("div");
   meta.className = "popup-meta";
+
   const lines = [];
-  if (r.roadName) lines.push(`Road: ${r.roadName}`);
-  lines.push(`Severity: ${Number(r.severity) || c.severity}`);
-  lines.push(`Time: ${created ? created.toLocaleString() : "--"}`);
-  lines.push(`Visible until: ${expires ? expires.toLocaleString() : "--"}`);
-  lines.push(`GPS accuracy: ${Number(r.accuracyM ?? 0).toFixed(1)} m`);
+  const roadName = seg?.name || run.find(r => r.roadName)?.roadName;
+  if (roadName) lines.push(`Road: ${roadName}`);
+  lines.push(`Severity: ${c.severity}`);
+
+  if (run.length > 1){
+    lines.push(`${run.length} reports over ${(lengthM / 1000).toFixed(1)} km`);
+    if (times.length) lines.push(`Most recent: ${relativeTime(times[0])}`);
+  } else if (times.length){
+    lines.push(`Reported: ${relativeTime(times[0])}`);
+  }
+
+  const worstAccuracy = Math.max(...run.map(r => Number(r.accuracyM ?? 0)));
+  lines.push(`GPS accuracy: ±${worstAccuracy.toFixed(0)} m`);
 
   lines.forEach((text, i) => {
     if (i) meta.appendChild(document.createElement("br"));
@@ -299,28 +372,99 @@ function buildPopup(r, c){
   return wrap;
 }
 
-function renderMarkers(reports){
+// Reports are drawn as the road itself rather than as pins. Two reports of the
+// same condition on the same road, within JOIN_MAX_M of each other, colour the
+// stretch between them; a lone report colours a short stub.
+function renderReports(reports){
   markersLayer.clearLayers();
 
-  for (const r of reports) {
-    // Coordinates were snapped to the road network before they were stored,
-    // so they are placed exactly as saved. No jitter: displacing a marker
-    // would move it back off the road.
+  const weight = weightForZoom(map.getZoom());
+
+  // Locate every report along its road.
+  const placed = [];
+  for (const r of reports){
     const c = condByKey.get(r.condition);
     if (!c) continue;
 
-    const m = L.marker([r.lat, r.lon], {
-      icon: makeDivIcon(r.condition),
-      keyboard: false
-    });
+    let seg = r.segmentId ? segmentById.get(r.segmentId) : null;
+    if (!seg){
+      // Legacy reports predate segmentId, so fall back to a fresh snap.
+      const snap = snapToRoad(r.lat, r.lon, SNAP_CAP_M);
+      if (snap) seg = segmentById.get(snap.segmentId);
+    }
+    if (!seg) continue;
 
-    m.bindPopup(buildPopup(r, c));
-    markersLayer.addLayer(m);
+    placed.push({ r, c, seg, alongM: alongDistanceOn(seg, r.lat, r.lon) });
   }
 
-  statusText.textContent = roadsStatus
-    ? `Showing ${reports.length} reports (last 24h). ${roadsStatus}`
-    : `Showing ${reports.length} reports (last 24h).`;
+  // Group by road + condition: a stretch may only be claimed for one condition.
+  const groups = new Map();
+  for (const p of placed){
+    const key = `${p.seg.id}|${p.r.condition}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+
+  let drawn = 0;
+  for (const group of groups.values()){
+    group.sort((a, b) => a.alongM - b.alongM);
+
+    // Walk the sorted reports, breaking a run wherever the gap is too wide to
+    // claim the road between them.
+    let run = [group[0]];
+    const runs = [];
+    for (let i = 1; i < group.length; i++){
+      if (group[i].alongM - run[run.length - 1].alongM <= JOIN_MAX_M) run.push(group[i]);
+      else { runs.push(run); run = [group[i]]; }
+    }
+    runs.push(run);
+
+    for (const members of runs){
+      const seg = members[0].seg;
+      const c = members[0].c;
+
+      let fromM = members[0].alongM;
+      let toM = members[members.length - 1].alongM;
+      if (members.length === 1){
+        fromM -= STUB_M / 2;
+        toM += STUB_M / 2;
+      }
+
+      const path = subPath(seg, fromM, toM);
+      if (path.length < 2) continue;
+
+      // Casing first so it sits underneath: pale conditions like frost or
+      // scattered ice would otherwise wash out against a light basemap.
+      markersLayer.addLayer(L.polyline(path, {
+        color: "#1a1a1a",
+        weight: weight + 4,
+        opacity: 0.28,
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false
+      }));
+
+      const line = L.polyline(path, {
+        color: c.color,
+        weight,
+        opacity: 0.95,
+        lineCap: "butt",
+        lineJoin: "round",
+        // "Scattered" conditions are intermittent, so the stroke is too.
+        dashArray: c.style === "striped" ? `${weight * 1.6} ${weight * 1.2}` : null,
+        interactive: true
+      });
+
+      line.bindPopup(buildPopup(members.map(m => m.r), c, seg, Math.abs(toM - fromM)));
+      markersLayer.addLayer(line);
+      drawn++;
+    }
+  }
+
+  const summary = reports.length
+    ? `${reports.length} reports on ${drawn} stretches (last 24h).`
+    : "No reports in the last 24 hours.";
+  statusText.textContent = roadsStatus ? `${summary} ${roadsStatus}` : summary;
 }
 
 // =========================
@@ -367,7 +511,7 @@ function startFirestore(){
       return (now - new Date(r.createdAt).getTime()) <= TTL_HOURS*3600*1000;
     });
 
-    renderMarkers(lastReports);
+    renderReports(lastReports);
   }, (err) => {
     console.error("Firestore error:", err);
     statusText.textContent = `Firestore error: ${err.message || err}`;
