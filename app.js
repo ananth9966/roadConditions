@@ -5,6 +5,9 @@ import {
   query, where, orderBy, limit, onSnapshot,
   serverTimestamp, Timestamp
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import {
+  getAuth, signInAnonymously, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 // =========================
 // Firebase config (yours)
@@ -21,12 +24,33 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Anonymous sign-in gives firestore.rules a request.auth to require, without
+// asking anyone to create an account. Failure is non-fatal: if Anonymous
+// sign-in is not yet enabled in the Firebase console the map still reads.
+let signedIn = false;
+onAuthStateChanged(auth, (user) => { signedIn = !!user; });
+signInAnonymously(auth).catch((err) => {
+  console.warn("Anonymous auth unavailable:", err?.code || err);
+});
 
 // =========================
 // CONFIG
 // =========================
 const TTL_HOURS = 24;
 const MAX_REPORTS = 500;
+
+// Snapping: reports are pinned to the nearest mapped road so a marker can
+// never land on a building, field or tree line.
+const ROADS_URL = "./data/rolette_segments.geojson";
+const SNAP_BASE_M = 25;   // slack beyond the reported GPS accuracy
+const SNAP_CAP_M  = 60;   // never snap further than this, however bad the fix
+const METRES_PER_DEG_LAT = 111320;
+// Rolette County spans 48.53-49.01; cos(lat) varies 0.8% across it, which is
+// under a metre at snapping range. One reference value keeps the projection
+// cheap enough to precompute every vertex once at load.
+const REF_COSLAT = Math.cos(48.77 * Math.PI / 180);
 
 // Condition model (solid vs striped for "Scattered ...")
 const CONDITIONS = [
@@ -68,6 +92,7 @@ const modalBackdrop = document.getElementById("modalBackdrop");
 const conditionSelect = document.getElementById("conditionSelect");
 const severityText = document.getElementById("severityText");
 const gpsText = document.getElementById("gpsText");
+const roadText = document.getElementById("roadText");
 const btnCancel = document.getElementById("btnCancel");
 const btnSubmit = document.getElementById("btnSubmit");
 
@@ -127,6 +152,8 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 const markersLayer = L.layerGroup().addTo(map);
 let lastReports = [];
+// Kept out of the report count line so a road-data failure stays visible.
+let roadsStatus = "";
 
 function markerSizeForZoom(z){
   // smaller for road display
@@ -145,21 +172,80 @@ map.on("zoomend", () => {
 });
 updateMarkerCssSize();
 
-// deterministic jitter
-function jitterLatLng(lat, lon, seed){
-  const z = map.getZoom();
-  const meters = Math.max(8, Math.min(22, 26 - (z * 1.2)));
+// =========================
+// Road network + snapping
+// =========================
+// Segments are projected once into a local metric plane so snapping is a
+// straight point-to-segment distance rather than repeated trig.
+let roadSegments = [];      // [{ id, name, xy: Float64Array }]
+let roadsReady = false;
 
-  let h = 0;
-  for (let i=0;i<seed.length;i++){ h = (h*31 + seed.charCodeAt(i)) | 0; }
-  const dx = (((h      ) & 255) - 128) / 128;
-  const dy = (((h >> 8 ) & 255) - 128) / 128;
+function lonLatToXY(lon, lat){
+  return [lon * REF_COSLAT * METRES_PER_DEG_LAT, lat * METRES_PER_DEG_LAT];
+}
+function xyToLonLat(x, y){
+  return [x / (REF_COSLAT * METRES_PER_DEG_LAT), y / METRES_PER_DEG_LAT];
+}
 
-  const dLat = (meters / 111111) * dy;
-  const cosLat = Math.max(0.1, Math.cos(Math.abs(lat) * Math.PI/180));
-  const dLon = (meters / (111111 * cosLat)) * dx;
+async function loadRoads(){
+  const res = await fetch(ROADS_URL);
+  if (!res.ok) throw new Error(`road data ${res.status}`);
+  const fc = await res.json();
 
-  return [lat + dLat, lon + dLon];
+  roadSegments = (fc.features || [])
+    .filter(f => f?.geometry?.type === "LineString" && f.geometry.coordinates.length >= 2)
+    .map(f => {
+      const coords = f.geometry.coordinates;
+      const xy = new Float64Array(coords.length * 2);
+      for (let i = 0; i < coords.length; i++){
+        const [x, y] = lonLatToXY(coords[i][0], coords[i][1]);
+        xy[i*2] = x;
+        xy[i*2+1] = y;
+      }
+      return { id: f.properties?.segmentId || "", name: f.properties?.name || "", xy };
+    });
+
+  roadsReady = roadSegments.length > 0;
+  return roadSegments.length;
+}
+
+// Nearest point on the road network. Returns null when nothing is close
+// enough, which is what stops a report being filed off-road.
+function snapToRoad(lat, lon, limitM){
+  if (!roadsReady) return null;
+
+  const [px, py] = lonLatToXY(lon, lat);
+  let bestD2 = Infinity, bestX = 0, bestY = 0, bestSeg = null;
+
+  for (const seg of roadSegments){
+    const xy = seg.xy;
+    for (let i = 0; i < xy.length - 2; i += 2){
+      const ax = xy[i], ay = xy[i+1];
+      const abx = xy[i+2] - ax, aby = xy[i+3] - ay;
+
+      const seg2 = abx*abx + aby*aby;
+      let t = seg2 === 0 ? 0 : ((px - ax)*abx + (py - ay)*aby) / seg2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+
+      const qx = ax + t*abx, qy = ay + t*aby;
+      const dx = px - qx, dy = py - qy;
+      const d2 = dx*dx + dy*dy;
+
+      if (d2 < bestD2){ bestD2 = d2; bestX = qx; bestY = qy; bestSeg = seg; }
+    }
+  }
+
+  if (!bestSeg) return null;
+  const distanceM = Math.sqrt(bestD2);
+  if (distanceM > limitM) return null;
+
+  const [snapLon, snapLat] = xyToLonLat(bestX, bestY);
+  return { lat: snapLat, lon: snapLon, segmentId: bestSeg.id, roadName: bestSeg.name, distanceM };
+}
+
+// How far from a road we still accept, widened by how poor the GPS fix is.
+function snapLimitFor(accuracyM){
+  return Math.min(SNAP_CAP_M, SNAP_BASE_M + (Number(accuracyM) || 0));
 }
 
 function makeDivIcon(conditionKey){
@@ -174,37 +260,59 @@ function makeDivIcon(conditionKey){
   });
 }
 
+// Built with DOM nodes, not an HTML string: every value here originates in
+// Firestore, so interpolating it into innerHTML would be an injection point.
+function buildPopup(r, c){
+  const wrap = document.createElement("div");
+
+  const title = document.createElement("div");
+  title.className = "popup-title";
+  title.textContent = c.label;
+  wrap.appendChild(title);
+
+  const created = r.createdAt ? new Date(r.createdAt) : null;
+  const expires = created ? new Date(created.getTime() + TTL_HOURS*3600*1000) : null;
+
+  const meta = document.createElement("div");
+  meta.className = "popup-meta";
+  const lines = [];
+  if (r.roadName) lines.push(`Road: ${r.roadName}`);
+  lines.push(`Severity: ${Number(r.severity) || c.severity}`);
+  lines.push(`Time: ${created ? created.toLocaleString() : "--"}`);
+  lines.push(`Visible until: ${expires ? expires.toLocaleString() : "--"}`);
+  lines.push(`GPS accuracy: ${Number(r.accuracyM ?? 0).toFixed(1)} m`);
+
+  lines.forEach((text, i) => {
+    if (i) meta.appendChild(document.createElement("br"));
+    meta.appendChild(document.createTextNode(text));
+  });
+  wrap.appendChild(meta);
+
+  return wrap;
+}
+
 function renderMarkers(reports){
   markersLayer.clearLayers();
 
   for (const r of reports) {
-    const [jLat, jLon] = jitterLatLng(r.lat, r.lon, r.id);
+    // Coordinates were snapped to the road network before they were stored,
+    // so they are placed exactly as saved. No jitter: displacing a marker
+    // would move it back off the road.
+    const c = condByKey.get(r.condition);
+    if (!c) continue;
 
-    const m = L.marker([jLat, jLon], {
+    const m = L.marker([r.lat, r.lon], {
       icon: makeDivIcon(r.condition),
       keyboard: false
     });
 
-    const created = r.createdAt ? new Date(r.createdAt) : null;
-    const expires = created ? new Date(created.getTime() + TTL_HOURS*3600*1000) : null;
-
-    const c = condByKey.get(r.condition);
-    const label = c ? c.label : r.condition;
-
-    m.bindPopup(`
-      <div class="popup-title">${label}</div>
-      <div class="popup-meta">
-        Severity: ${r.severity ?? (c?.severity ?? "--")}<br/>
-        Time: ${created ? created.toLocaleString() : "--"}<br/>
-        Visible until: ${expires ? expires.toLocaleString() : "--"}<br/>
-        Accuracy: ${Number(r.accuracyM ?? 0).toFixed(1)} m
-      </div>
-    `);
-
+    m.bindPopup(buildPopup(r, c));
     markersLayer.addLayer(m);
   }
 
-  statusText.textContent = `Showing ${reports.length} reports (last 24h).`;
+  statusText.textContent = roadsStatus
+    ? `Showing ${reports.length} reports (last 24h). ${roadsStatus}`
+    : `Showing ${reports.length} reports (last 24h).`;
 }
 
 // =========================
@@ -227,6 +335,11 @@ function startFirestore(){
       const data = d.data();
       const createdAt = data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : null;
 
+      // Anything whose condition is not one of ours is discarded rather than
+      // rendered: the collection is publicly writable until rules land.
+      if (!condByKey.has(data.condition)) continue;
+      if (!Number.isFinite(Number(data.lat)) || !Number.isFinite(Number(data.lon))) continue;
+
       out.push({
         id: d.id,
         condition: data.condition,
@@ -234,6 +347,8 @@ function startFirestore(){
         lat: Number(data.lat),
         lon: Number(data.lon),
         accuracyM: Number(data.accuracyM ?? 0),
+        roadName: typeof data.roadName === "string" ? data.roadName.slice(0, 80) : "",
+        segmentId: typeof data.segmentId === "string" ? data.segmentId.slice(0, 40) : "",
         createdAt
       });
     }
@@ -289,35 +404,39 @@ function getBestPosition({
       return;
     }
 
-    let best = null; // {pos, t}
-    const t0 = Date.now();
+    let best = null;      // { pos }
+    let settled = false;
+    let watchId = null;
+    let timer = null;
 
-    const watchId = navigator.geolocation.watchPosition(
+    // An independent timer is what actually bounds the wait. Checking elapsed
+    // time inside the success callback is not enough: a stationary device can
+    // deliver one fix and then go quiet, and the callback never runs again.
+    function finish(fn, arg){
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      fn(arg);
+    }
+
+    timer = setTimeout(() => {
+      if (best) finish(resolve, best.pos);
+      else finish(reject, new Error("Timed out waiting for a GPS fix."));
+    }, maxWaitMs);
+
+    watchId = navigator.geolocation.watchPosition(
       (pos) => {
         const acc = pos.coords.accuracy ?? Infinity;
 
-        // keep best
         if (!best || acc < (best.pos.coords.accuracy ?? Infinity)) {
-          best = { pos, t: Date.now() };
+          best = { pos };
         }
-
-        // resolve early if good enough
         if (acc <= desiredAccuracyM) {
-          navigator.geolocation.clearWatch(watchId);
-          resolve(best.pos);
-        }
-
-        // timeout
-        if (Date.now() - t0 >= maxWaitMs) {
-          navigator.geolocation.clearWatch(watchId);
-          if (best) resolve(best.pos);
-          else reject(new Error("No GPS fix. Check permissions."));
+          finish(resolve, best.pos);
         }
       },
-      (err) => {
-        navigator.geolocation.clearWatch(watchId);
-        reject(err);
-      },
+      (err) => finish(reject, err),
       {
         enableHighAccuracy,
         timeout: maxWaitMs,
@@ -358,29 +477,72 @@ window.addEventListener("load", () => {
 // =========================
 // Modal + submit
 // =========================
-function openModal(){
+// Shows the user where their pin is about to land, and how far it moved.
+const previewLayer = L.layerGroup().addTo(map);
+
+function showSnapPreview(rawLat, rawLon, snap){
+  previewLayer.clearLayers();
+  L.polyline([[rawLat, rawLon], [snap.lat, snap.lon]], {
+    color: "#111", weight: 2, dashArray: "4,4", opacity: 0.7
+  }).addTo(previewLayer);
+  L.circleMarker([snap.lat, snap.lon], {
+    radius: 6, color: "#111", weight: 2, fillColor: "#fff", fillOpacity: 1
+  }).addTo(previewLayer);
+}
+
+// The fix captured when the modal opened; submit uses this rather than
+// re-acquiring, so what gets stored is exactly what was previewed.
+let pendingFix = null;
+
+async function openModal(){
   modalBackdrop.style.display = "flex";
   gpsText.textContent = "GPS: checking…";
+  roadText.textContent = "Road: --";
   btnSubmit.disabled = true;
+  pendingFix = null;
+  previewLayer.clearLayers();
 
-  getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 })
-    .then((pos) => {
-      const { accuracy } = pos.coords;
-      gpsText.textContent = `GPS accuracy: ±${accuracy.toFixed(0)} m`;
-      // Optional: block submit if too inaccurate
-      btnSubmit.disabled = accuracy > 100;
-      if (accuracy > 100) {
-        gpsText.textContent += " (too low — move to open sky and try again)";
-      }
-    })
-    .catch(() => {
-      gpsText.textContent = "GPS unavailable (permission denied?)";
-      btnSubmit.disabled = true;
-    });
+  if (!roadsReady){
+    roadText.textContent = "Road data not loaded yet — try again in a moment.";
+    return;
+  }
+
+  let pos;
+  try {
+    pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 });
+  } catch {
+    gpsText.textContent = "GPS unavailable (permission denied?)";
+    return;
+  }
+
+  const { latitude, longitude, accuracy } = pos.coords;
+  gpsText.textContent = `GPS accuracy: ±${accuracy.toFixed(0)} m`;
+
+  if (accuracy > 100){
+    gpsText.textContent += " (too low — move to open sky and try again)";
+    return;
+  }
+
+  const snap = snapToRoad(latitude, longitude, snapLimitFor(accuracy));
+  if (!snap){
+    roadText.textContent = "You are not on a mapped road. Move onto the road to report.";
+    return;
+  }
+
+  pendingFix = { lat: latitude, lon: longitude, accuracyM: accuracy, snap };
+  roadText.textContent = snap.roadName
+    ? `Road: ${snap.roadName} — pin moved ${snap.distanceM.toFixed(0)} m`
+    : `Snapped to road — pin moved ${snap.distanceM.toFixed(0)} m`;
+
+  showSnapPreview(latitude, longitude, snap);
+  map.setView([snap.lat, snap.lon], Math.max(map.getZoom(), 15));
+  btnSubmit.disabled = false;
 }
 
 function closeModal(){
   modalBackdrop.style.display = "none";
+  previewLayer.clearLayers();
+  pendingFix = null;
 }
 
 btnAdd.addEventListener("click", openModal);
@@ -390,27 +552,36 @@ modalBackdrop.addEventListener("click", (e) => {
 });
 
 async function submitReport(){
+  // Without a snapped fix there is nothing valid to file.
+  if (!pendingFix){
+    roadText.textContent = "No road match — nothing to submit.";
+    return;
+  }
+
   btnSubmit.disabled = true;
   btnSubmit.textContent = "Submitting…";
 
-  try {
-    const pos = await getBestPosition({ maxWaitMs: 9000, desiredAccuracyM: 25 });
-    const { latitude, longitude, accuracy } = pos.coords;
+  const { snap, accuracyM } = pendingFix;
 
+  try {
     const c = condByKey.get(conditionSelect.value);
     if (!c) throw new Error("Invalid condition.");
 
     await addDoc(collection(db, "reports"), {
       condition: c.key,
       severity: c.severity,
-      lat: latitude,
-      lon: longitude,
-      accuracyM: accuracy,
+      lat: snap.lat,                 // snapped, not raw
+      lon: snap.lon,
+      accuracyM,
+      segmentId: snap.segmentId,
+      roadName: snap.roadName,
+      snapDistanceM: snap.distanceM,
       createdAt: serverTimestamp()
     });
 
+    const { lat, lon } = snap;
     closeModal();
-    map.setView([latitude, longitude], Math.max(map.getZoom(), 14));
+    map.setView([lat, lon], Math.max(map.getZoom(), 15));
   } catch (e) {
     console.error(e);
     alert(`Submit failed: ${e.message || e}`);
@@ -427,4 +598,16 @@ btnSubmit.addEventListener("click", submitReport);
 // =========================
 buildLegendAndSelect();
 startFirestore();
-statusText.textContent = "Ready.";
+
+statusText.textContent = "Loading road data…";
+loadRoads()
+  .then((n) => {
+    roadsStatus = "";
+    statusText.textContent = `Ready. ${n} road segments loaded.`;
+  })
+  .catch((err) => {
+    console.error("Road data failed:", err);
+    // Reporting stays disabled rather than silently allowing off-road pins.
+    roadsStatus = "Road data unavailable — reporting disabled.";
+    statusText.textContent = roadsStatus;
+  });
