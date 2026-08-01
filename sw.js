@@ -7,7 +7,7 @@
  * Bump CACHE_VERSION whenever the shell or the road data changes; old caches
  * are deleted on activate.
  */
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const SHELL_CACHE = `rc-shell-${CACHE_VERSION}`;
 const VENDOR_CACHE = `rc-vendor-${CACHE_VERSION}`;
 const TILE_CACHE = `rc-tiles-${CACHE_VERSION}`;

@@ -54,9 +54,23 @@
       <button class="legendClose" id="legendClose" aria-label="Close legend">✕</button>
     </div>
     <div id="legendRows"></div>
+
     <div class="muted" style="margin-top:10px;">
-      Reports are shown for 24 hours.
+      Reports stay visible for 48 hours and fade as they age.
+      Community reports — not an official road report.
     </div>
+
+    <label class="optIn">
+      <input type="checkbox" id="passiveToggle" />
+      <span>
+        <strong>Share slow-traffic signals</strong>
+        <span class="muted small">
+          While the app is open and you are driving, send “this road was slow”
+          for roads you travel. No route or journey is recorded or uploaded —
+          only that a road was slow, at most once every 15 minutes.
+        </span>
+      </span>
+    </label>
   </div>
 
   <!-- Bottom-right FAB stack -->
@@ -71,6 +85,30 @@
 
     <!-- Add Report button -->
     <button class="fab primary" id="btnAdd" aria-label="Add report">+</button>
+  </div>
+
+  <!-- Quick report: the only surface shown while moving. Two taps, no typing,
+       no dropdown, targets big enough to hit without looking. -->
+  <div class="quickSheet" id="quickSheet" role="dialog" aria-modal="true" aria-label="Quick report">
+    <div class="quickHead">
+      <div>
+        <div class="quickTitle">Report this road</div>
+        <div class="muted" id="quickRoad">Locating…</div>
+      </div>
+      <button class="legendClose" id="quickClose" aria-label="Close">✕</button>
+    </div>
+
+    <div class="quickGrid" id="quickGrid"></div>
+
+    <button class="quickMore" id="quickMore">More conditions…</button>
+    <div class="muted small" id="quickHint"></div>
+  </div>
+
+  <!-- Undo toast: reports file immediately, so the safety net is after the
+       fact rather than a confirmation step before it. -->
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span id="toastText"></span>
+    <button class="toastUndo" id="toastUndo">Undo</button>
   </div>
 
   <!-- Modal -->

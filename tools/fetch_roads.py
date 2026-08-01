@@ -92,6 +92,155 @@ def simplify(coords, coslat, tol=SIMPLIFY_M):
     return [c for c, k in zip(coords, keep) if k]
 
 
+def _node(pt):
+    return (round(pt[0], 5), round(pt[1], 5))
+
+
+def _length_m(coords, coslat):
+    import math
+    return sum(
+        math.hypot((coords[i + 1][0] - coords[i][0]) * coslat * LAT_SCALE,
+                   (coords[i + 1][1] - coords[i][1]) * LAT_SCALE)
+        for i in range(len(coords) - 1)
+    )
+
+
+def merge_roads(features):
+    """Join OSM ways that are really one road.
+
+    OSM splits a road wherever a tag changes, and again at every intersection.
+    Reports can only be joined along a shared way, so an un-merged network
+    means two reports on the same highway often fail to connect.
+
+    Two rules, both conservative:
+
+    * Named ways sharing an endpoint merge when exactly two ways *of that name*
+      meet there. Crossing traffic does not matter -- staying on 102nd Street
+      through a crossroads is still 102nd Street.
+    * Unnamed ways merge only at a true continuation node: exactly two way-ends
+      total and no other way passing through. Without a name there is nothing
+      else to prove the road continues.
+
+    Anything that branches or forms a loop is left alone, because "distance
+    along the road" stops being well defined.
+    """
+    from collections import Counter, defaultdict
+
+    ends = Counter()
+    interior = set()
+    touching = defaultdict(list)
+
+    for i, f in enumerate(features):
+        c = f["geometry"]["coordinates"]
+        a, b = _node(c[0]), _node(c[-1])
+        ends[a] += 1
+        ends[b] += 1
+        touching[a].append(i)
+        touching[b].append(i)
+        for p in c[1:-1]:
+            interior.add(_node(p))
+
+    name_of = [f["properties"].get("name", "") for f in features]
+    parent = list(range(len(features)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for node, members in touching.items():
+        by_name = defaultdict(set)
+        for i in set(members):
+            by_name[name_of[i]].add(i)
+
+        for name, idxs in by_name.items():
+            if len(idxs) != 2:
+                continue
+            a, b = sorted(idxs)
+            if name:
+                union(a, b)
+            elif ends[node] == 2 and node not in interior:
+                union(a, b)
+
+    groups = defaultdict(list)
+    for i in range(len(features)):
+        groups[find(i)].append(i)
+
+    merged, kept_apart = [], 0
+    for members in groups.values():
+        if len(members) == 1:
+            merged.append(features[members[0]])
+            continue
+
+        chained = _chain(features, members)
+        if chained is None:
+            # Branching or looping: ship the pieces rather than guess an order.
+            kept_apart += 1
+            merged.extend(features[i] for i in members)
+        else:
+            merged.append(chained)
+
+    return merged, kept_apart
+
+
+def _chain(features, members):
+    """Order a group of ways nose-to-tail into one LineString, or None."""
+    from collections import defaultdict
+
+    adj = defaultdict(list)
+    for i in members:
+        c = features[i]["geometry"]["coordinates"]
+        a, b = _node(c[0]), _node(c[-1])
+        if a == b:
+            return None                     # closed loop
+        adj[a].append(i)
+        adj[b].append(i)
+
+    if any(len(v) > 2 for v in adj.values()):
+        return None                         # branches
+
+    tips = [n for n, v in adj.items() if len(v) == 1]
+    if len(tips) != 2:
+        return None                         # ring, or disconnected
+
+    start = tips[0]
+    remaining = set(members)
+    coords = []
+    node = start
+
+    while remaining:
+        nxt = next((i for i in adj[node] if i in remaining), None)
+        if nxt is None:
+            return None
+        remaining.discard(nxt)
+
+        c = list(features[nxt]["geometry"]["coordinates"])
+        if _node(c[0]) != node:
+            c.reverse()
+        if _node(c[0]) != node:
+            return None                     # geometry does not actually meet
+
+        coords.extend(c if not coords else c[1:])
+        node = _node(c[-1])
+
+    first = features[members[0]]["properties"]
+    props = {"segmentId": first["segmentId"]}
+    if first.get("name"):
+        props["name"] = first["name"]
+
+    return {
+        "type": "Feature",
+        "properties": props,
+        "geometry": {"type": "LineString", "coordinates": coords},
+    }
+
+
 def main():
     data = fetch()
     import math
@@ -124,15 +273,24 @@ def main():
             "geometry": {"type": "LineString", "coordinates": deduped},
         })
 
+    before = len(features)
+    features, kept_apart = merge_roads(features)
+
     fc = {"type": "FeatureCollection", "features": features}
     out = pathlib.Path(__file__).resolve().parent.parent / "data" / "rolette_segments.geojson"
     out.write_text(json.dumps(fc, separators=(",", ":")), encoding="utf-8")
 
     pts = sum(len(f["geometry"]["coordinates"]) for f in features)
-    print("segments: %d" % len(features))
+    print("ways:     %d -> %d roads after merging (%d groups left unmerged)"
+          % (before, len(features), kept_apart))
     print("vertices: %d -> %d (%.0f%% removed by %.0f m simplify)"
           % (raw_vertices, pts, 100 * (1 - pts / max(raw_vertices, 1)), SIMPLIFY_M))
     print("size:     %.0f KB" % (out.stat().st_size / 1024))
+
+    lens = sorted(_length_m(f["geometry"]["coordinates"], coslat) for f in features)
+    n = len(lens)
+    print("length:   p50 %.0f m   p75 %.0f m   max %.0f m"
+          % (lens[n // 2], lens[int(n * 0.75)], lens[-1]))
 
 
 if __name__ == "__main__":

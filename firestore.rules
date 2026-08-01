@@ -72,6 +72,34 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Passive "this road was slow" signals. Deliberately a separate
+    // collection from reports: a human saying the road is icy and a phone
+    // noticing slow travel are different kinds of claim and must not be
+    // rendered or trusted as the same thing.
+    match /traffic/{signalId} {
+      allow read: if true;
+      allow update, delete: if false;
+
+      allow create: if request.auth != null
+                    && request.resource.data.keys().hasOnly([
+                         'segmentId', 'roadName', 'lat', 'lon',
+                         'speedBucketMps', 'createdAt'
+                       ])
+                    && request.resource.data.keys().hasAll([
+                         'segmentId', 'lat', 'lon', 'speedBucketMps', 'createdAt'
+                       ])
+                    && request.resource.data.segmentId is string
+                    && request.resource.data.segmentId.size() <= 40
+                    && isInCounty(request.resource.data.lat, request.resource.data.lon)
+                    && request.resource.data.speedBucketMps is int
+                    && request.resource.data.speedBucketMps >= 0
+                    && request.resource.data.speedBucketMps <= 40
+                    && (!('roadName' in request.resource.data)
+                        || (request.resource.data.roadName is string
+                            && request.resource.data.roadName.size() <= 80))
+                    && request.resource.data.createdAt == request.time;
+    }
+
     // Anything not matched above is denied.
     match /{document=**} {
       allow read, write: if false;

@@ -2,7 +2,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, addDoc,
+  collection, addDoc, deleteDoc,
   query, where, orderBy, limit, onSnapshot,
   serverTimestamp, Timestamp
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -46,8 +46,26 @@ signInAnonymously(auth).catch((err) => {
 // =========================
 // CONFIG
 // =========================
-const TTL_HOURS = 24;
+// Roads here can go unplowed for days, so a report does not stop being true
+// after 24 hours. Older reports stay visible but fade, which beats deleting
+// information that is still the best anyone has.
+const REPORT_WINDOW_HOURS = 48;
+const FRESH_HOURS = 3;          // fully opaque up to here, then fades
 const MAX_REPORTS = 500;
+
+// Above this speed the UI collapses to four large buttons. 4.5 m/s is about
+// 10 mph — walking pace is fine, driving is not.
+const DRIVING_SPEED_MPS = 4.5;
+
+// The conditions worth surfacing as one-tap buttons in motion. Everything
+// else stays behind "More".
+const QUICK_KEYS = ["iceCompactedSnow", "snowCovered", "scatteredSnowDrifts", "seasonalGood"];
+
+// Passive sensing: sustained slow travel is itself a road-condition signal.
+const PASSIVE_OPT_IN_KEY = "rc.passive.optin";
+const PASSIVE_SLOW_MPS = 8.9;        // ~20 mph
+const PASSIVE_MIN_SAMPLES = 6;       // ignore a single slow blip
+const PASSIVE_COOLDOWN_MS = 15 * 60 * 1000;  // one signal per road per 15 min
 
 // Snapping: reports are pinned to the nearest mapped road so a marker can
 // never land on a building, field or tree line.
@@ -104,6 +122,17 @@ const roadText = document.getElementById("roadText");
 const btnCancel = document.getElementById("btnCancel");
 const btnSubmit = document.getElementById("btnSubmit");
 
+const quickSheet = document.getElementById("quickSheet");
+const quickGrid = document.getElementById("quickGrid");
+const quickRoad = document.getElementById("quickRoad");
+const quickHint = document.getElementById("quickHint");
+const quickClose = document.getElementById("quickClose");
+const quickMore = document.getElementById("quickMore");
+
+const toast = document.getElementById("toast");
+const toastText = document.getElementById("toastText");
+const toastUndo = document.getElementById("toastUndo");
+
 // =========================
 // Legend + Select
 // =========================
@@ -131,6 +160,22 @@ function buildLegendAndSelect(){
     conditionSelect.appendChild(opt);
   }
 
+  // The most important row on the map: grey is not "clear", it is "nobody
+  // has said". Roads that go unreported are often the ones nobody could get
+  // through, so this distinction has to be explicit.
+  const unknown = document.createElement("div");
+  unknown.className = "row";
+  const usym = document.createElement("div");
+  usym.className = "sym solid";
+  usym.style.setProperty("--c", "#8d98a8");
+  unknown.appendChild(usym);
+  const ulabel = document.createElement("div");
+  ulabel.className = "label";
+  ulabel.innerHTML = "";
+  ulabel.textContent = "No report — condition unknown, not necessarily clear";
+  unknown.appendChild(ulabel);
+  legendRows.appendChild(unknown);
+
   conditionSelect.value = "seasonalGood";
   updateSeverityText();
 }
@@ -157,6 +202,15 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
+
+// The whole covered network is drawn in grey beneath the reports. Without it
+// an unreported road is invisible, and users read "no line" as "clear" — the
+// dangerous reading, because the roads nobody reports are often the worst.
+// Canvas rather than SVG: 2000+ paths would crawl as DOM nodes on a phone.
+map.createPane("networkPane");
+map.getPane("networkPane").style.zIndex = 350;
+const networkRenderer = L.canvas({ pane: "networkPane", padding: 0.3 });
+const networkLayer = L.layerGroup().addTo(map);
 
 const markersLayer = L.layerGroup().addTo(map);
 let lastReports = [];
@@ -224,7 +278,25 @@ async function loadRoads(){
 
   segmentById = new Map(roadSegments.map(s => [s.id, s]));
   roadsReady = roadSegments.length > 0;
+
+  drawNetwork(fc.features);
   return roadSegments.length;
+}
+
+// Fixed hairline weight, so zooming never needs 2000 restyle calls.
+function drawNetwork(features){
+  networkLayer.clearLayers();
+  for (const f of features){
+    const latlngs = f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    networkLayer.addLayer(L.polyline(latlngs, {
+      renderer: networkRenderer,
+      pane: "networkPane",
+      color: "#8d98a8",
+      weight: 2,
+      opacity: 0.5,
+      interactive: false
+    }));
+  }
 }
 
 // Distance from the start of a road to the point on it closest to lat/lon.
@@ -320,6 +392,58 @@ function snapToRoad(lat, lon, limitM){
 // How far from a road we still accept, widened by how poor the GPS fix is.
 function snapLimitFor(accuracyM){
   return Math.min(SNAP_CAP_M, SNAP_BASE_M + (Number(accuracyM) || 0));
+}
+
+// =========================
+// Live position
+// =========================
+// A continuous watch runs for as long as the app is open, so filing a report
+// is instant instead of waiting up to nine seconds for a fresh fix. At speed
+// that wait is the difference between a usable app and a dangerous one.
+let lastFix = null;          // { lat, lon, accuracyM, speedMps, at }
+let watchId = null;
+const fixListeners = new Set();
+
+function onFix(fn){ fixListeners.add(fn); return () => fixListeners.delete(fn); }
+
+function startPositionWatch(){
+  if (watchId !== null || !navigator.geolocation) return;
+
+  watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const { latitude, longitude, accuracy, speed } = pos.coords;
+      lastFix = {
+        lat: latitude,
+        lon: longitude,
+        accuracyM: accuracy ?? 999,
+        // speed is null on hardware that does not supply it; treat as stopped
+        speedMps: Number.isFinite(speed) && speed !== null ? speed : 0,
+        at: Date.now()
+      };
+      fixListeners.forEach(fn => fn(lastFix));
+    },
+    (err) => console.warn("position watch:", err?.message || err),
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+  );
+}
+
+function stopPositionWatch(){
+  if (watchId === null) return;
+  navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+}
+
+// A fix older than this is not worth filing a report against.
+const FIX_MAX_AGE_MS = 20000;
+
+function freshFix(){
+  if (!lastFix) return null;
+  return (Date.now() - lastFix.at) <= FIX_MAX_AGE_MS ? lastFix : null;
+}
+
+function isDriving(){
+  const f = freshFix();
+  return !!f && f.speedMps >= DRIVING_SPEED_MPS;
 }
 
 function relativeTime(date){
@@ -433,12 +557,23 @@ function renderReports(reports){
       const path = subPath(seg, fromM, toM);
       if (path.length < 2) continue;
 
+      // Age is the information here. A stretch reported twenty hours ago is
+      // still worth showing when the plow may not come for days, but it must
+      // not look as authoritative as one from ten minutes ago.
+      const newest = Math.max(...members.map(m =>
+        m.r.createdAt ? new Date(m.r.createdAt).getTime() : 0));
+      const ageH = newest ? (Date.now() - newest) / 3600000 : REPORT_WINDOW_HOURS;
+      const fade = ageH <= FRESH_HOURS
+        ? 1
+        : Math.max(0.35, 1 - 0.65 * ((ageH - FRESH_HOURS) /
+                                     (REPORT_WINDOW_HOURS - FRESH_HOURS)));
+
       // Casing first so it sits underneath: pale conditions like frost or
       // scattered ice would otherwise wash out against a light basemap.
       markersLayer.addLayer(L.polyline(path, {
         color: "#1a1a1a",
         weight: weight + 4,
-        opacity: 0.28,
+        opacity: 0.28 * fade,
         lineCap: "round",
         lineJoin: "round",
         interactive: false
@@ -447,7 +582,7 @@ function renderReports(reports){
       const line = L.polyline(path, {
         color: c.color,
         weight,
-        opacity: 0.95,
+        opacity: 0.95 * fade,
         lineCap: "butt",
         lineJoin: "round",
         // "Scattered" conditions are intermittent, so the stroke is too.
@@ -471,7 +606,7 @@ function renderReports(reports){
 // Firestore stream (last 24 hours)
 // =========================
 function startFirestore(){
-  const sinceDate = new Date(Date.now() - TTL_HOURS*3600*1000);
+  const sinceDate = new Date(Date.now() - REPORT_WINDOW_HOURS*3600*1000);
   const sinceTs = Timestamp.fromDate(sinceDate);
 
   const q = query(
@@ -508,7 +643,7 @@ function startFirestore(){
     const now = Date.now();
     lastReports = out.filter(r => {
       if (!r.createdAt) return true;
-      return (now - new Date(r.createdAt).getTime()) <= TTL_HOURS*3600*1000;
+      return (now - new Date(r.createdAt).getTime()) <= REPORT_WINDOW_HOURS*3600*1000;
     });
 
     renderReports(lastReports);
@@ -600,6 +735,16 @@ function getBestPosition({
 
 async function centerOnBestLocation(){
   try {
+    // The live watch usually already has something good enough, so this is
+    // instant rather than a fresh nine-second acquisition.
+    const cached = freshFix();
+    if (cached && cached.accuracyM <= 50){
+      map.setView([cached.lat, cached.lon], Math.max(map.getZoom(), 14));
+      statusText.textContent = `GPS OK (±${cached.accuracyM.toFixed(0)}m).`;
+      gpsHint.textContent = "";
+      return;
+    }
+
     statusText.textContent = "Getting your location…";
     gpsHint.textContent = "";
 
@@ -621,10 +766,90 @@ async function centerOnBestLocation(){
 
 btnCurrent.addEventListener("click", centerOnBestLocation);
 
-// Ask location on load (your requirement)
-window.addEventListener("load", () => {
-  centerOnBestLocation();
+// The permission prompt is no longer fired blind on load. The watch starts
+// once, on the first deliberate action, so the browser dialog arrives with
+// context rather than before the map has even drawn.
+let locationRequested = false;
+
+function ensureLocation(){
+  if (locationRequested) return;
+  locationRequested = true;
+  startPositionWatch();
+}
+
+btnCurrent.addEventListener("click", ensureLocation);
+btnAdd.addEventListener("click", ensureLocation);
+
+onFix((fix) => {
+  applyDrivingMode();
+  refreshQuickTarget();
+  passiveObserve(fix);
 });
+
+document.addEventListener("visibilitychange", () => {
+  // No point burning GPS while the app is in the background, and on iOS it
+  // gets suspended anyway.
+  if (document.hidden) stopPositionWatch();
+  else if (locationRequested) startPositionWatch();
+});
+
+// =========================
+// Passive sensing (opt-in)
+// =========================
+// Sustained slow travel on a road is itself a condition signal, and it costs
+// the driver nothing. What leaves the device is deliberately *not* a track:
+// only "this road was slow", once per road per cooldown. No path, no
+// timestamps per point, nothing that reconstructs a journey.
+let passiveOptIn = localStorage.getItem(PASSIVE_OPT_IN_KEY) === "1";
+const passiveSamples = new Map();   // segmentId -> { slow, total, lastSent }
+
+function setPassiveOptIn(on){
+  passiveOptIn = on;
+  localStorage.setItem(PASSIVE_OPT_IN_KEY, on ? "1" : "0");
+  if (!on) passiveSamples.clear();
+}
+
+async function passiveObserve(fix){
+  if (!passiveOptIn || !roadsReady) return;
+  if (fix.speedMps < DRIVING_SPEED_MPS) return;   // parked or walking
+
+  const snap = snapToRoad(fix.lat, fix.lon, snapLimitFor(fix.accuracyM));
+  if (!snap) return;
+
+  let bucket = passiveSamples.get(snap.segmentId);
+  if (!bucket){
+    bucket = { slow: 0, total: 0, lastSent: 0 };
+    passiveSamples.set(snap.segmentId, bucket);
+  }
+
+  bucket.total += 1;
+  if (fix.speedMps <= PASSIVE_SLOW_MPS) bucket.slow += 1;
+
+  const enough = bucket.slow >= PASSIVE_MIN_SAMPLES;
+  const mostlySlow = bucket.total > 0 && bucket.slow / bucket.total >= 0.7;
+  const offCooldown = Date.now() - bucket.lastSent > PASSIVE_COOLDOWN_MS;
+
+  if (!(enough && mostlySlow && offCooldown)) return;
+
+  bucket.lastSent = Date.now();
+  bucket.slow = 0;
+  bucket.total = 0;
+
+  try {
+    await addDoc(collection(db, "traffic"), {
+      segmentId: snap.segmentId,
+      roadName: snap.roadName,
+      lat: snap.lat,
+      lon: snap.lon,
+      // Rounded hard: the point is "slow here", not how slow, and a coarse
+      // number is far less identifying.
+      speedBucketMps: Math.round(PASSIVE_SLOW_MPS),
+      createdAt: serverTimestamp()
+    });
+  } catch (e) {
+    console.warn("passive signal not sent:", e?.code || e);
+  }
+}
 
 // =========================
 // Modal + submit
@@ -649,6 +874,162 @@ let pendingFix = null;
 function setRoadNotice(kind, message){
   roadText.className = `notice ${kind}`;
   roadText.textContent = message;
+}
+
+// =========================
+// Quick report
+// =========================
+// Nothing here waits on a fresh GPS fix: the watch has been running since the
+// app opened, so a tap files immediately. The safety net is Undo afterwards
+// rather than a confirm step in front.
+let pendingUndo = null;   // { timer, docRef }
+
+function buildQuickGrid(){
+  quickGrid.innerHTML = "";
+  for (const key of QUICK_KEYS){
+    const c = condByKey.get(key);
+    if (!c) continue;
+
+    const btn = document.createElement("button");
+    btn.className = "quickBtn";
+    btn.type = "button";
+
+    const sw = document.createElement("span");
+    sw.className = `swatch ${c.style}`;
+    sw.style.setProperty("--c", c.color);
+    btn.appendChild(sw);
+
+    const label = document.createElement("span");
+    label.textContent = c.label;
+    btn.appendChild(label);
+
+    btn.addEventListener("click", () => quickSubmit(c));
+    quickGrid.appendChild(btn);
+  }
+}
+
+function refreshQuickTarget(){
+  if (!quickSheet.classList.contains("open")) return;
+
+  const fix = freshFix();
+  if (!fix){
+    quickRoad.textContent = "Waiting for GPS…";
+    return;
+  }
+  if (!roadsReady){
+    quickRoad.textContent = "Road data still loading…";
+    return;
+  }
+
+  const snap = snapToRoad(fix.lat, fix.lon, snapLimitFor(fix.accuracyM));
+  quickRoad.textContent = snap
+    ? (snap.roadName || "Unnamed road")
+    : "Not on a mapped road";
+  quickHint.textContent = snap ? "" : "Move onto the road to report.";
+}
+
+function openQuickSheet(){
+  quickSheet.classList.add("open");
+  refreshQuickTarget();
+}
+
+function closeQuickSheet(){
+  quickSheet.classList.remove("open");
+}
+
+async function quickSubmit(c){
+  const fix = freshFix();
+  if (!fix){
+    quickHint.textContent = "No GPS fix yet — try again in a moment.";
+    return;
+  }
+  if (!roadsReady){
+    quickHint.textContent = "Road data still loading.";
+    return;
+  }
+
+  const snap = snapToRoad(fix.lat, fix.lon, snapLimitFor(fix.accuracyM));
+  if (!snap){
+    quickHint.textContent = "You are not on a mapped road.";
+    return;
+  }
+
+  closeQuickSheet();
+
+  try {
+    const ref = await addDoc(collection(db, "reports"), {
+      condition: c.key,
+      severity: c.severity,
+      lat: snap.lat,
+      lon: snap.lon,
+      accuracyM: fix.accuracyM,
+      segmentId: snap.segmentId,
+      roadName: snap.roadName,
+      snapDistanceM: snap.distanceM,
+      createdAt: serverTimestamp()
+    });
+    showUndo(`${c.label} reported on ${snap.roadName || "this road"}`, ref);
+  } catch (e) {
+    console.error(e);
+    showUndo(`Could not file report: ${e.message || e}`, null);
+  }
+}
+
+function showUndo(message, docRef){
+  toastText.textContent = message;
+  toastUndo.style.display = docRef ? "" : "none";
+  toast.classList.add("show");
+
+  if (pendingUndo?.timer) clearTimeout(pendingUndo.timer);
+  pendingUndo = {
+    docRef,
+    timer: setTimeout(() => {
+      toast.classList.remove("show");
+      pendingUndo = null;
+    }, 6000)
+  };
+}
+
+toastUndo.addEventListener("click", async () => {
+  const ref = pendingUndo?.docRef;
+  toast.classList.remove("show");
+  if (pendingUndo?.timer) clearTimeout(pendingUndo.timer);
+  pendingUndo = null;
+  if (!ref) return;
+
+  try {
+    await deleteDoc(ref);
+  } catch (e) {
+    // Rules make reports append-only, so this only succeeds while the write
+    // is still queued locally. Tell the truth rather than pretend.
+    console.warn("undo failed:", e?.code || e);
+    showUndo("Report already filed — it cannot be withdrawn.", null);
+  }
+});
+
+quickClose.addEventListener("click", closeQuickSheet);
+quickMore.addEventListener("click", () => {
+  closeQuickSheet();
+  openModal();
+});
+
+// =========================
+// Driving mode
+// =========================
+// Above walking pace the interface collapses to the four buttons and nothing
+// else. No dropdown, no legend, no map fiddling.
+let drivingNow = false;
+
+function applyDrivingMode(){
+  const driving = isDriving();
+  if (driving === drivingNow) return;
+  drivingNow = driving;
+  document.body.classList.toggle("driving", driving);
+
+  if (driving){
+    closeModal();
+    legend.classList.add("collapsed");
+  }
 }
 
 async function openModal(){
@@ -704,7 +1085,9 @@ function closeModal(){
   pendingFix = null;
 }
 
-btnAdd.addEventListener("click", openModal);
+// The + button now opens the two-tap sheet. The detailed modal is reachable
+// from "More conditions…" inside it, and never while driving.
+btnAdd.addEventListener("click", openQuickSheet);
 btnCancel.addEventListener("click", closeModal);
 modalBackdrop.addEventListener("click", (e) => {
   if (e.target === modalBackdrop) closeModal();
@@ -756,7 +1139,20 @@ btnSubmit.addEventListener("click", submitReport);
 // Boot
 // =========================
 buildLegendAndSelect();
+buildQuickGrid();
+
+// Passive sensing consent, off unless explicitly turned on.
+const passiveToggle = document.getElementById("passiveToggle");
+passiveToggle.checked = passiveOptIn;
+passiveToggle.addEventListener("change", () => {
+  setPassiveOptIn(passiveToggle.checked);
+  if (passiveToggle.checked) ensureLocation();
+});
+
 startFirestore();
+
+// Re-render on a timer so age fading advances without needing a new report.
+setInterval(() => { if (lastReports.length) renderReports(lastReports); }, 5 * 60 * 1000);
 
 statusText.textContent = "Loading road data…";
 loadRoads()
